@@ -2,18 +2,9 @@
 ## This module contains the bispectrum estimation code
 
 import numpy as np
-import multiprocessing as mp, os, tqdm, time
-from scipy.interpolate import InterpolatedUnivariateSpline
+import multiprocessing as mp, os, tqdm, time, sys
 import pywigxjpf as wig
-import sys, uuid
-
-def globalize(func):
-    """Decorator to make a multiprocessing function globally accessible."""
-    def result(*args, **kwargs):
-        return func(*args, **kwargs)
-    result.__name__ = result.__qualname__ = uuid.uuid4().hex
-    setattr(sys.modules[result.__module__], result.__name__, result)
-    return result
+from .cython import binned_utils as utils
 
 class BSpecBin():
     """Binned bispectrum estimation class. This takes the binning strategy as input and a base class. 
@@ -173,15 +164,29 @@ class BSpecBin():
         self.sym_factor = np.concatenate(self.sym_factor_all)
         self.N_b = len(self.sym_factor)
         print("Using a total of %d bins"%self.N_b)
+    
+    def _compute_H_p1m2_maps(self, input_alm):
+        """Compute (+1)H and (-2)H maps for an input dataset in harmonic space."""
+        p1_H_maps = np.zeros((self.Nl_squeeze,1+2*self.pol,self.base.Npix), dtype=np.complex128)
+        m2_H_maps = np.zeros((self.Nl_squeeze,1+2*self.pol,self.base.Npix), dtype=np.complex128)
+        for bin1 in range(self.Nl_squeeze):
+            p1_H_maps[bin1] = self.base.compute_spin_transform_map(self.ell_bins[bin1]*input_alm.conj(),+1)
+            m2_H_maps[bin1] = self.base.compute_spin_transform_map(self.ell_bins[bin1]*input_alm.conj(),-2)
+        return p1_H_maps, m2_H_maps
         
     def _compute_H_pm(self, a_lm, spin):
         """
         Compute (+-s)H maps for an input a_lm field. This is defined as Sum_lm (+-s)Y_lm(n) a_lm.
         """
         assert spin>0
-        H_plus = [self.base.compute_spin_transform_map(a_lm*self.ell_bins[bin1], spin) for bin1 in range(self.Nl_squeeze)]
-        H_minus = [np.asarray([(-1)**spin*H.conj() for H in this_H_plus]) for this_H_plus in H_plus]
-        return H_plus, H_minus
+        H_plus_maps  = np.zeros((self.Nl_squeeze,1+2*self.pol,self.base.Npix), dtype=np.complex128)
+        H_minus_maps = np.zeros((self.Nl_squeeze,1+2*self.pol,self.base.Npix), dtype=np.complex128)
+        for bin1 in range(self.Nl_squeeze):
+            H_map = self.base.compute_spin_transform_map(a_lm*self.ell_bins[bin1], spin)
+            H_plus_maps[bin1] = H_map
+            for i in range(1+2*self.pol): 
+                H_minus_maps[bin1,i] = (-1)**spin*H_map[i].conj()
+        return H_plus_maps, H_minus_maps
     
     def get_ells(self, field='TTT'):
         """
@@ -223,8 +228,7 @@ class BSpecBin():
         h_alpha_lm = self.applySinv(sim, input_type=input_type)
         
         # Compute (+1)H and (-2)H maps
-        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*h_alpha_lm.conj(),+1) for bin1 in range(self.Nl_squeeze)]
-        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*h_alpha_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
+        p1_H_maps, m2_H_maps = self._compute_H_p1m2_maps(h_alpha_lm)
         return p1_H_maps, m2_H_maps
 
     def load_sims(self, load_sim, N_sims, verb=False, input_type='map', preload=True):
@@ -331,37 +335,10 @@ class BSpecBin():
         
         # Compute (+1)H and (-2)H maps
         if verb: print("Computing H maps")
-        
-        global p1_H_maps, m2_H_maps
-        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*h_data_lm.conj(),+1) for bin1 in range(self.Nl_squeeze)]
-        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*h_data_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
-        
-        @globalize
-        def _analyze3(full_index):
-            """Compute the cubic piece of the bispectrum numerator"""
-            index = full_index%len(self.all_bins)
-            chi_index = full_index//len(self.all_bins)
-            
-            u1,u2,u3,bin1,bin2,bin3,p_u = self.all_bins[index]
-            
-            # Compute combination of fields
-            tmp_sum  = p1_H_maps[bin1][u1]*p1_H_maps[bin2][u2]*m2_H_maps[bin3][u3]
-            tmp_sum += p1_H_maps[bin2][u2]*p1_H_maps[bin3][u3]*m2_H_maps[bin1][u1]
-            tmp_sum += p1_H_maps[bin3][u3]*p1_H_maps[bin1][u1]*m2_H_maps[bin2][u2]
-                
-            # Perform map-level summation and take real/im part
-            chi = self.chi_arr[chi_index]
-            if p_u*chi==-1:
-                tmp_sum2 = tmp_sum*1.0j
-            else:
-                tmp_sum2 = tmp_sum
-            return self.base.A_pix*np.real(np.sum(tmp_sum2))/3./self.sym_factor[index]
-        
-        with mp.Pool(self.base.nthreads) as p:
-            if verb:
-                b3_num = np.asarray(list(tqdm.tqdm(p.imap(_analyze3,range(self.N_b)),total=self.N_b)))
-            else:
-                b3_num = np.asarray(list(p.imap(_analyze3,range(self.N_b))))
+        p1_H_maps, m2_H_maps = self._compute_H_p1m2_maps(h_data_lm)
+
+        if verb: print("Assembling cubic term")
+        b3_num = self.base.A_pix/3.*utils.assemble_b3_all(p1_H_maps, m2_H_maps, np.asarray(self.all_bins,dtype=np.int32), np.asarray(self.chi_arr, dtype=np.int32), np.asarray(self.sym_factor, dtype=np.int32), self.N_b, self.base.nthreads)
         
         # Compute b_1 part of cubic estimator, averaging over simulations
         b1_num = np.zeros(self.N_b)
@@ -370,50 +347,18 @@ class BSpecBin():
             print("No linear correction applied!")
         else:
             for ii in range(self.N_it):
-                if (ii+1)%5==0 and verb: print("Computing b_1 piece from simulation %d"%(ii+1))
+                if (ii+1)%5==0 and verb: print("Assembling linear term from simulation %d"%(ii+1))
 
                 # Load processed bias simulations 
-                global this_p1_H_maps, this_m2_H_maps
                 if self.preload:
                     this_p1_H_maps, this_m2_H_maps = self.p1_H_maps[ii], self.m2_H_maps[ii]
                 else:
                     this_p1_H_maps, this_m2_H_maps = self.load_sim_data(ii)
 
-                @globalize
-                def _analyze1(full_index):
-                    """Compute the cubic piece of the bispectrum numerator"""
-                    index = full_index%len(self.all_bins)
-                    chi_index = full_index//len(self.all_bins)
-                    
-                    u1,u2,u3,bin1,bin2,bin3,p_u = self.all_bins[index]
-                    
-                    # Compute combination of fields
-                    tmp_sum  = p1_H_maps[bin1][u1]*this_p1_H_maps[bin2][u2]*this_m2_H_maps[bin3][u3]
-                    tmp_sum += p1_H_maps[bin2][u2]*this_p1_H_maps[bin3][u3]*this_m2_H_maps[bin1][u1]
-                    tmp_sum += p1_H_maps[bin3][u3]*this_p1_H_maps[bin1][u1]*this_m2_H_maps[bin2][u2]
-                    
-                    tmp_sum += this_p1_H_maps[bin1][u1]*p1_H_maps[bin2][u2]*this_m2_H_maps[bin3][u3]
-                    tmp_sum += this_p1_H_maps[bin2][u2]*p1_H_maps[bin3][u3]*this_m2_H_maps[bin1][u1]
-                    tmp_sum += this_p1_H_maps[bin3][u3]*p1_H_maps[bin1][u1]*this_m2_H_maps[bin2][u2]
-                    
-                    tmp_sum += this_p1_H_maps[bin1][u1]*this_p1_H_maps[bin2][u2]*m2_H_maps[bin3][u3]
-                    tmp_sum += this_p1_H_maps[bin2][u2]*this_p1_H_maps[bin3][u3]*m2_H_maps[bin1][u1]
-                    tmp_sum += this_p1_H_maps[bin3][u3]*this_p1_H_maps[bin1][u1]*m2_H_maps[bin2][u2]
-    
-                    # Perform map-level summation and take real/im part
-                    chi = self.chi_arr[chi_index]
-                    if p_u*chi==-1:
-                        tmp_sum2 = tmp_sum*1.0j
-                    else:
-                        tmp_sum2 = tmp_sum
-                    return -self.base.A_pix*np.real(np.sum(tmp_sum2))/3./self.sym_factor[index]/self.N_it
-    
-                with mp.Pool(self.base.nthreads) as p:
-                    if verb:
-                        b1_num += np.asarray(list(tqdm.tqdm(p.imap(_analyze1,range(self.N_b)),total=self.N_b)))
-                    else:
-                        b1_num += np.asarray(list(p.imap(_analyze1,range(self.N_b))))
-    
+                b1_num += -self.base.A_pix/self.N_it/3.*utils.assemble_b1_all(p1_H_maps, m2_H_maps, this_p1_H_maps, this_m2_H_maps,
+                                                                np.asarray(self.all_bins,dtype=np.int32), np.asarray(self.chi_arr, dtype=np.int32), 
+                                                                np.asarray(self.sym_factor, dtype=np.int32), self.N_b, self.base.nthreads)
+                
         # Assemble numerator
         b_num = b3_num + b1_num
         del p1_H_maps, m2_H_maps
@@ -452,7 +397,7 @@ class BSpecBin():
                 if self.ones_mask:
                     Uinv_a_lm = self.applySinv(self.beam_lm*a_lm, input_type='harmonic')
                 else:
-                    Uinv_a_lm = self.applySinv(self.mask*self.base.to_map(self.beam_lm*a_lm))
+                    Uinv_a_lm = self.applySinv(self.mask*self.base.to_map(self.beam_lm*a_lm), input_type='map')
             elif weighting=='Ainv':
                 Uinv_a_lm = self.base.applyAinv(a_lm, input_type='harmonic')
                 
@@ -558,7 +503,7 @@ class BSpecBin():
                     if self.ones_mask:
                         Q_maps[index] = self.applySinv(self.beam_lm*tmp_Q[index],input_type='harmonic').ravel()
                     else:
-                        Q_maps[index] = self.applySinv(self.mask*self.base.to_map(self.beam_lm*tmp_Q[index])).ravel()
+                        Q_maps[index] = self.applySinv(self.mask*self.base.to_map(self.beam_lm*tmp_Q[index]), input_type='map').ravel()
                 elif weighting=='Sinv':
                     Q_maps[index] = (self.base.m_weight*tmp_Q[index]).ravel()
                         
@@ -657,42 +602,15 @@ class BSpecBin():
 
         # Compute (+1)H and (-2)H maps
         if verb: print("Computing H maps")
-        global p1_H_maps, m2_H_maps
-        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*Cinv_data_lm.conj(),1) for bin1 in range(self.Nl_squeeze)]
-        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*Cinv_data_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
-
-        # Define output array
-        b_num_ideal = np.zeros(self.N_b)
-    
-        @globalize
-        def _analyze_num(full_index):
-            """Compute the cubic piece of the bispectrum numerator"""
-            index = full_index%len(self.all_bins)
-            chi_index = index//len(self.all_bins)
-            
-            u1,u2,u3,bin1,bin2,bin3,p_u = self.all_bins[index]
-            
-            # Compute combination of fields
-            tmp_sum  = p1_H_maps[bin1][u1]*p1_H_maps[bin2][u2]*m2_H_maps[bin3][u3]
-            tmp_sum += p1_H_maps[bin2][u2]*p1_H_maps[bin3][u3]*m2_H_maps[bin1][u1]
-            tmp_sum += p1_H_maps[bin3][u3]*p1_H_maps[bin1][u1]*m2_H_maps[bin2][u2]
-                
-            # Perform map-level summation and take real/im part
-            chi = self.chi_arr[chi_index]
-            if p_u*chi==-1:
-                tmp_sum2 = tmp_sum*1.0j
-            else:
-                tmp_sum2 = tmp_sum
-            return self.base.A_pix*np.real(np.sum(tmp_sum2))/3./self.sym_factor[index]
+        p1_H_maps, m2_H_maps = self._compute_H_p1m2_maps(Cinv_data_lm)
         
-        if verb: print("Analyzing bispectrum numerator")
-        with mp.Pool(self.base.nthreads) as p:
-            if verb:
-                b_num_ideal = np.asarray(list(tqdm.tqdm(p.imap(_analyze_num,range(self.N_b)),total=self.N_b)))
-            else:
-                b_num_ideal = np.asarray(list(p.imap(_analyze_num,range(self.N_b))))
+        # Assemble output
+        if verb: print("Assembling output")
+        b_num_ideal = self.base.A_pix/3.*utils.assemble_b3_all(p1_H_maps, m2_H_maps, 
+                                                               np.asarray(self.all_bins,dtype=np.int32), np.asarray(self.chi_arr, dtype=np.int32), 
+                                                               np.asarray(self.sym_factor, dtype=np.int32), self.N_b, self.base.nthreads)
         
-        # Normalize
+        # Add normalization
         b_num_ideal *= 1./np.mean(self.mask**3)
         return b_num_ideal
     

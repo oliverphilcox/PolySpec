@@ -623,7 +623,7 @@ class TSpecBin():
                 if self.ones_mask:
                     Uinv_a_lms = [self.applySinv(self.beam_lm*a_lm, input_type='harmonic') for a_lm in a_maps]
                 else:
-                    Uinv_a_lms = [self.applySinv(self.mask*self.base.to_map(self.beam_lm*a_lm)) for a_lm in a_maps]
+                    Uinv_a_lms = [self.applySinv(self.mask*self.base.to_map(self.beam_lm*a_lm),input_type='map') for a_lm in a_maps]
             elif weighting=='Ainv':
                 Uinv_a_lms = [self.base.applyAinv(a_lm, input_type='harmonic') for a_lm in a_maps]
                 
@@ -781,7 +781,7 @@ class TSpecBin():
                         if self.ones_mask:
                             Q_maps[index] = self.applySinv(self.beam_lm*tmp_Q[index],input_type='harmonic').ravel()
                         else:
-                            Q_maps[index] = self.applySinv(self.mask*self.base.to_map(self.beam_lm*tmp_Q[index])).ravel()
+                            Q_maps[index] = self.applySinv(self.mask*self.base.to_map(self.beam_lm*tmp_Q[index]), input_type='map').ravel()
                     elif weighting=='Sinv':
                         Q_maps[index] = (self.base.m_weight*tmp_Q[index]).ravel()
                 return Q_maps

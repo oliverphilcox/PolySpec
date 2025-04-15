@@ -79,7 +79,7 @@ Further details can be found in the Tutorials. We additionally provide a sample 
 - ducc0 [optional but recommended, for fast SHTs]
 - [wignerSymbols](https://github.com/joeydumont/wignerSymbols) [included with the Cython module]
 
-When using the template estimators, a number of Cython modules must be installed. This can be done using the following command:
+To use the code, a number of Cython modules must be installed. This can be done using the following command:
 ```cd polyspec/cython; python setup.py build_ext --inplace; cd ../../```
 
 ### Code References

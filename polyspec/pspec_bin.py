@@ -114,7 +114,7 @@ class PSpecBin():
                 if self.ones_mask:
                     Uinv_a_lm = self.applySinv(self.beam_lm*a_lm, input_type='harmonic')
                 else:
-                    Uinv_a_lm = self.applySinv(self.mask*self.base.to_map(self.beam_lm*a_lm))
+                    Uinv_a_lm = self.applySinv(self.mask*self.base.to_map(self.beam_lm*a_lm), input_type='map')
             elif weighting=='Ainv':
                 Uinv_a_lm = self.base.applyAinv(a_lm, input_type='harmonic')
                 
@@ -145,7 +145,7 @@ class PSpecBin():
                         if self.ones_mask:
                             Q_maps[index] = self.applySinv(self.beam_lm*summand,input_type='harmonic').ravel()
                         else:
-                            Q_maps[index] = self.applySinv(self.mask*self.base.to_map(self.beam_lm*summand)).ravel()
+                            Q_maps[index] = self.applySinv(self.mask*self.base.to_map(self.beam_lm*summand), input_type='map').ravel()
                     elif weighting=='Sinv':
                         Q_maps[index] = (self.base.m_weight*summand).ravel()
             return Q_maps

@@ -23,7 +23,7 @@ for module in modules:
     )
 
 # Compile remaining pyx files with C
-modules = ['k_integrals','ideal_fisher']
+modules = ['k_integrals','ideal_fisher','binned_utils']
 for module in modules:
     ext_modules = [
         Extension(
