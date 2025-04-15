@@ -87,7 +87,7 @@ To use the code, a number of Cython modules must be installed. This can be done 
 2. Philcox, O. H. E., "Optimal Estimation of the Binned Mask-Free Power Spectrum, Bispectrum, and Trispectrum on the Full Sky: Tensor Edition", (2023) ([arXiv](https://arxiv.org/abs/2306.03915))
 3. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 1. Primordial Theory & Optimal Estimators", (2025) ([arXiv](https://arxiv.org/abs/2502.04434))
 4. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 2. Code & Validation", (2025) ([arXiv](http://arxiv.org/abs/2502.05258))
-5. Philcox, O. H., E., Hill, J., C., "The ISW-Lensing Bispectrum & Trispectrum", (2025) (in prep)
+5. Philcox, O. H., E., Hill, J., C., "The ISW-Lensing Bispectrum & Trispectrum", (2025) ([arXiv](https://arxiv.org/abs/2504.03826))
 
 ### Applications
 6. Philcox, O. H. E., "Do the CMB Temperature Fluctuations Conserve Parity?", (2023) ([arXiv](https://arxiv.org/abs/2303.12106))
