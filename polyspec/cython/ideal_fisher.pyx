@@ -796,7 +796,6 @@ cpdef double[:,::1] fisher_deriv_fNL_loc(double[:,:,::1] plXs, double[:,:,::1] q
     cdef double[:,:,::1] zetaPP_l = np.zeros((nl,nr,nr),dtype=np.float64)
     cdef double[:,:,::1] zetaPQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
     cdef double[:,:,::1] zetaQQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
-    cdef double[:,:,::1] zeta_l = np.zeros((nl,nr,nr),dtype=np.float64)
     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
     cdef double pref = dpow(4.*M_PI,2.)*18./25.
     
@@ -820,6 +819,163 @@ cpdef double[:,::1] fisher_deriv_fNL_loc(double[:,:,::1] plXs, double[:,:,::1] q
         jr = ijr%nr
         deriv_matrix[ir,jr] = pref*weights[ir]*weights[jr]*_zeta_sum_symB(zetaPP_l[:,ir,jr], zetaPQ_l[:,ir,jr], zetaPQ_l[:,jr,ir], zetaQQ_l[:,ir,jr], legs, w_mus, nmu, nl)
 
+    return deriv_matrix
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cpdef double[:,::1] fisher_deriv_fNL_eq(double[:,:,::1] plXs, double[:,:,::1] qlXs, double[:,:,::1] r1lXs, double[:,:,::1] r2lXs, double[:] weights, double[:,:,::1] inv_Cl_mat,
+                                   double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
+    """Compute the exact Fisher matrix for the fNL^{eq} template."""
+
+    cdef int nl = lmax+1-lmin, nr = len(plXs[0,0]), npol = len(plXs[0]), nmu = len(w_mus)
+    cdef int il, ir, ijr, imu, jr, ipol, jpol
+    cdef double XYsum, lsum, musum
+    cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
+    cdef double[:,:,::1] zetaPP_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zetaPQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zetaPR1_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zetaPR2_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zetaQQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zetaQR1_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zetaQR2_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zetaR1R1_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zetaR1R2_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zetaR2R2_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
+    cdef double pref = dpow(4.*M_PI,2.)*54./25.
+    
+    # Precompute r-dependent and l-dependent factors
+    for il in xrange(nl):
+        twol_arr[il] = (2.*il+2*lmin+1.)
+
+    # Compute (2l+1) u^Y S^-1 v^X for each r, r', l
+    for il in prange(nl, nogil=True,schedule='static',num_threads=nthreads):
+        for ir in xrange(nr):
+            for jr in xrange(nr):
+                for ipol in xrange(npol):
+                    for jpol in xrange(npol):
+                        zetaPP_l[il,ir,jr]  += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*plXs[il+lmin,ipol,ir] * plXs[il+lmin,jpol,jr]
+                        zetaPQ_l[il,ir,jr]  += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*plXs[il+lmin,ipol,ir] * qlXs[il+lmin,jpol,jr]
+                        zetaPR1_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*plXs[il+lmin,ipol,ir] *r1lXs[il+lmin,jpol,jr]
+                        zetaPR2_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*plXs[il+lmin,ipol,ir] *r2lXs[il+lmin,jpol,jr]
+                        zetaQQ_l[il,ir,jr]  += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*qlXs[il+lmin,ipol,ir] * qlXs[il+lmin,jpol,jr]
+                        zetaQR1_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*qlXs[il+lmin,ipol,ir] *r1lXs[il+lmin,jpol,jr]
+                        zetaQR2_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*qlXs[il+lmin,ipol,ir] *r2lXs[il+lmin,jpol,jr]
+                        zetaR1R1_l[il,ir,jr]+= twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*r1lXs[il+lmin,ipol,ir]*r1lXs[il+lmin,jpol,jr]
+                        zetaR1R2_l[il,ir,jr]+= twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*r1lXs[il+lmin,ipol,ir]*r2lXs[il+lmin,jpol,jr]
+                        zetaR2R2_l[il,ir,jr]+= twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*r2lXs[il+lmin,ipol,ir]*r2lXs[il+lmin,jpol,jr]
+                        
+    # Compute sum over l, mu for each r, r'
+    for ijr in prange(nr*nr, nogil=True,schedule='static',num_threads=nthreads):
+        ir = ijr//nr
+        jr = ijr%nr
+
+        deriv_matrix[ir,jr] += pref*weights[ir]*weights[jr]*_zeta_sum_eqB(zetaPP_l[:,ir,jr],  zetaPQ_l[:,ir,jr],  zetaPR1_l[:,ir,jr],  zetaPR2_l[:,ir,jr],
+                                                                     zetaPQ_l[:,jr,ir],  zetaQQ_l[:,ir,jr],  zetaQR1_l[:,ir,jr],  zetaQR2_l[:,ir,jr],
+                                                                     zetaPR1_l[:,jr,ir], zetaQR1_l[:,jr,ir], zetaR1R1_l[:,ir,jr], zetaR1R2_l[:,ir,jr],
+                                                                     zetaPR2_l[:,jr,ir], zetaQR2_l[:,jr,ir], zetaR1R2_l[:,jr,ir], zetaR2R2_l[:,ir,jr], legs, w_mus, nmu, nl)
+        
+    return deriv_matrix
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cpdef double[:,::1] fisher_deriv_neural_cyclic(double[:,:,:,::1] alpha_lXs, double[:,:,:,::1] beta_lXs, double[:] neural_weights, double[:] weights, double[:,:,::1] inv_Cl_mat,
+                                   double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
+    """Compute the exact Fisher matrix for the cyclic neural template."""
+
+    cdef int nl = lmax+1-lmin, nr = len(alpha_lXs[0,0,0]), npol = len(alpha_lXs[0,0]), nmu = len(w_mus), nterm = len(neural_weights)
+    cdef int iterm, jterm, il, ir, ijr, imu, jr, ipol, jpol
+    cdef double XYsum, lsum, musum
+    cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
+    cdef double[:,:,::1] zetaAA_l, zetaAB_l, zetaBA_l, zetaBB_l
+    cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
+    cdef double pref = dpow(4.*M_PI,2.)*18./25.
+    
+    # Precompute r-dependent and l-dependent factors
+    for il in xrange(nl):
+        twol_arr[il] = (2.*il+2*lmin+1.)
+
+    for iterm in xrange(nterm):
+        for jterm in xrange(nterm):
+            zetaAA_l = np.zeros((nl,nr,nr),dtype=np.float64)
+            zetaAB_l = np.zeros((nl,nr,nr),dtype=np.float64)
+            zetaBA_l = np.zeros((nl,nr,nr),dtype=np.float64)
+            zetaBB_l = np.zeros((nl,nr,nr),dtype=np.float64)
+
+            # Compute (2l+1) f^Y S^-1 g^X for each r, r', l
+            for il in prange(nl, nogil=True,schedule='static',num_threads=nthreads):
+                for ir in xrange(nr):
+                    for jr in xrange(nr):
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                zetaAA_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*alpha_lXs[iterm,il+lmin,ipol,ir]*alpha_lXs[jterm,il+lmin,jpol,jr]
+                                zetaAB_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*alpha_lXs[iterm,il+lmin,ipol,ir]*beta_lXs[jterm,il+lmin,jpol,jr]
+                                zetaBA_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*beta_lXs[iterm,il+lmin,ipol,ir]*alpha_lXs[jterm,il+lmin,jpol,jr]
+                                zetaBB_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*beta_lXs[iterm,il+lmin,ipol,ir]*beta_lXs[jterm,il+lmin,jpol,jr]
+
+            # Compute sum over l, mu for each r, r'
+            for ijr in prange(nr*nr, nogil=True,schedule='static',num_threads=nthreads):
+                ir = ijr//nr
+                jr = ijr%nr
+                deriv_matrix[ir,jr] += neural_weights[iterm]*neural_weights[jterm]*pref*weights[ir]*weights[jr]*_zeta_sum_symB(zetaBB_l[:,ir,jr], zetaAB_l[:,ir,jr], zetaBA_l[:,ir,jr], zetaAA_l[:,ir,jr], legs, w_mus, nmu, nl)
+
+    return deriv_matrix
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cpdef double[:,::1] fisher_deriv_neural(double[:,:,:,::1] alpha_lXs, double[:,:,:,::1] beta_lXs, double[:,:,:,::1] gamma_lXs, double[:] neural_weights, double[:] weights, double[:,:,::1] inv_Cl_mat,
+                                   double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
+    """Compute the exact Fisher matrix for the general neural template."""
+
+    cdef int nl = lmax+1-lmin, nr = len(alpha_lXs[0,0,0]), npol = len(alpha_lXs[0,0]), nmu = len(w_mus), nterm = len(neural_weights)
+    cdef int iterm, jterm, il, ir, ijr, imu, jr, ipol, jpol
+    cdef double XYsum, lsum, musum
+    cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
+    cdef double[:,:,::1] zetaAA_l, zetaAB_l, zetaAC_l, zetaBA_l, zetaBB_l, zetaBC_l, zetaCA_l, zetaCB_l, zetaCC_l
+    cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
+    cdef double pref = dpow(4.*M_PI,2.)*9./25.
+    
+    # Precompute r-dependent and l-dependent factors
+    for il in xrange(nl):
+        twol_arr[il] = (2.*il+2*lmin+1.)
+
+    for iterm in xrange(nterm):
+        for jterm in xrange(nterm):
+            zetaAA_l = np.zeros((nl,nr,nr),dtype=np.float64)
+            zetaAB_l = np.zeros((nl,nr,nr),dtype=np.float64)
+            zetaAC_l = np.zeros((nl,nr,nr),dtype=np.float64)
+            zetaBA_l = np.zeros((nl,nr,nr),dtype=np.float64)
+            zetaBB_l = np.zeros((nl,nr,nr),dtype=np.float64)
+            zetaBC_l = np.zeros((nl,nr,nr),dtype=np.float64)
+            zetaCA_l = np.zeros((nl,nr,nr),dtype=np.float64)
+            zetaCB_l = np.zeros((nl,nr,nr),dtype=np.float64)
+            zetaCC_l = np.zeros((nl,nr,nr),dtype=np.float64)
+
+            # Compute (2l+1) f^Y S^-1 g^X for each r, r', l
+            for il in prange(nl, nogil=True,schedule='static',num_threads=nthreads):
+                for ir in xrange(nr):
+                    for jr in xrange(nr):
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                zetaAA_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*alpha_lXs[iterm,il+lmin,ipol,ir]*alpha_lXs[jterm,il+lmin,jpol,jr]
+                                zetaAB_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*alpha_lXs[iterm,il+lmin,ipol,ir]*beta_lXs[jterm,il+lmin,jpol,jr]
+                                zetaAC_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*alpha_lXs[iterm,il+lmin,ipol,ir]*gamma_lXs[jterm,il+lmin,jpol,jr]
+                                zetaBA_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*beta_lXs[iterm,il+lmin,ipol,ir]*alpha_lXs[jterm,il+lmin,jpol,jr]
+                                zetaBB_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*beta_lXs[iterm,il+lmin,ipol,ir]*beta_lXs[jterm,il+lmin,jpol,jr]
+                                zetaBC_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*beta_lXs[iterm,il+lmin,ipol,ir]*gamma_lXs[jterm,il+lmin,jpol,jr]
+                                zetaCA_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*gamma_lXs[iterm,il+lmin,ipol,ir]*alpha_lXs[jterm,il+lmin,jpol,jr]
+                                zetaCB_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*gamma_lXs[iterm,il+lmin,ipol,ir]*beta_lXs[jterm,il+lmin,jpol,jr]
+                                zetaCC_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*gamma_lXs[iterm,il+lmin,ipol,ir]*gamma_lXs[jterm,il+lmin,jpol,jr]
+
+            # Compute sum over l, mu for each r, r'
+            for ijr in prange(nr*nr, nogil=True, schedule='static', num_threads=nthreads):
+                ir = ijr//nr
+                jr = ijr%nr
+                deriv_matrix[ir,jr] += neural_weights[iterm]*neural_weights[jterm]*pref*weights[ir]*weights[jr]*_zeta_sum_asymB(zetaAA_l[:,ir,jr], zetaAB_l[:,ir,jr], zetaAC_l[:,ir,jr], zetaBA_l[:,ir,jr], zetaBB_l[:,ir,jr], zetaBC_l[:,ir,jr], zetaCA_l[:,ir,jr], zetaCB_l[:,ir,jr], zetaCC_l[:,ir,jr], legs, w_mus, nmu, nl)
+            
     return deriv_matrix
 
 @cython.boundscheck(False)
@@ -888,7 +1044,7 @@ cdef double _zeta_sum(double[:] zetaAA_l, double[:,::1] legs, double[:] w_mus, i
 @cython.cdivision(True)
 cdef double _zeta_sum_symB(double[:] zetaAA_l, double[:] zetaAB_l, double[:] zetaBA_l, double[:] zetaBB_l, 
                           double[:,::1] legs, double[:] w_mus, int nmu, int nl) noexcept nogil:
-    """Utility function to sum over l, mu in the exact estimators. This is a specialized version for the bispectrum."""
+    """Utility function to sum over l, mu in the exact estimators. This is a specialized version for the cyclic bispectrum."""
     cdef int il,imu
     cdef double musum, AAsum, ABsum, BAsum, BBsum
     musum = 0.
@@ -903,6 +1059,95 @@ cdef double _zeta_sum_symB(double[:] zetaAA_l, double[:] zetaAB_l, double[:] zet
             BAsum += zetaBA_l[il]*legs[imu,il]
             BBsum += zetaBB_l[il]*legs[imu,il]
         musum += (AAsum*AAsum*BBsum+2*ABsum*BAsum*AAsum)*w_mus[imu]
+    return musum
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cdef double _zeta_sum_eqB(double[:] zetaPP_l, double[:] zetaPQ_l, double[:] zetaPR1_l, double[:] zetaPR2_l,
+                          double[:] zetaQP_l, double[:] zetaQQ_l, double[:] zetaQR1_l, double[:] zetaQR2_l,
+                          double[:] zetaR1P_l, double[:] zetaR1Q_l, double[:] zetaR1R1_l, double[:] zetaR1R2_l,
+                          double[:] zetaR2P_l, double[:] zetaR2Q_l, double[:] zetaR2R1_l, double[:] zetaR2R2_l,
+                          double[:,::1] legs, double[:] w_mus, int nmu, int nl) noexcept nogil:
+    """Utility function to sum over l, mu in the exact estimators. This is a specialized version for the equilateral bispectrum template."""
+    cdef int il,imu
+    cdef double musum, PPsum, PQsum, PR1sum, PR2sum, QPsum, QQsum, QR1sum, QR2sum, R1Psum, R1Qsum, R1R1sum, R1R2sum, R2Psum, R2Qsum, R2R1sum, R2R2sum
+    musum = 0.
+    for imu in xrange(nmu):
+        PPsum = 0.
+        PQsum = 0.
+        PR1sum = 0.
+        PR2sum = 0.
+        QPsum = 0.
+        QQsum = 0.
+        QR1sum = 0.
+        QR2sum = 0.
+        R1Psum = 0.
+        R1Qsum = 0.
+        R1R1sum = 0.
+        R1R2sum = 0.
+        R2Psum = 0.
+        R2Qsum = 0.
+        R2R1sum = 0.
+        R2R2sum = 0.
+        for il in xrange(nl):
+            PPsum += zetaPP_l[il]*legs[imu,il]
+            PQsum += zetaPQ_l[il]*legs[imu,il]
+            PR1sum += zetaPR1_l[il]*legs[imu,il]
+            PR2sum += zetaPR2_l[il]*legs[imu,il]
+            QPsum += zetaQP_l[il]*legs[imu,il]
+            QQsum += zetaQQ_l[il]*legs[imu,il]
+            QR1sum += zetaQR1_l[il]*legs[imu,il]
+            QR2sum += zetaQR2_l[il]*legs[imu,il]
+            R1Psum += zetaR1P_l[il]*legs[imu,il]
+            R1Qsum += zetaR1Q_l[il]*legs[imu,il]
+            R1R1sum += zetaR1R1_l[il]*legs[imu,il]
+            R1R2sum += zetaR1R2_l[il]*legs[imu,il]
+            R2Psum += zetaR2P_l[il]*legs[imu,il]
+            R2Qsum += zetaR2Q_l[il]*legs[imu,il]
+            R2R1sum += zetaR2R1_l[il]*legs[imu,il]
+            R2R2sum += zetaR2R2_l[il]*legs[imu,il]
+
+        musum += w_mus[imu]*((6*(R1R1sum*R2R2sum*PPsum + R1R2sum*R2Psum*PR1sum + R1Psum*R2R1sum*PR2sum + R1R1sum*R2Psum*PR2sum + R1R2sum*R2R1sum*PPsum + R1Psum*R2R2sum*PR1sum) 
+                             -6*(R1Psum*R2Psum*PQsum + R1Psum*R2Qsum*PPsum + R1Qsum*R2Psum*PPsum)
+                             -6*(PR1sum*PR2sum*QPsum + PR1sum*PPsum*QR2sum + PR2sum*PPsum*QR1sum)
+                             -12*(R1R2sum*R2R2sum*PR2sum)
+                             -12*(R2R1sum*R2R2sum*R2Psum)
+                             +3*(PPsum*PPsum*QQsum+2*PQsum*PPsum*QPsum)
+                             +6*(PR2sum*PR2sum*QR2sum)
+                             +6*(R2Psum*R2Psum*R2Qsum)
+                             +4*(R2R2sum*R2R2sum*R2R2sum)))
+    return musum
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cdef double _zeta_sum_asymB(double[:] zetaAA_l, double[:] zetaAB_l, double[:] zetaAC_l, double[:] zetaBA_l, double[:] zetaBB_l, double[:] zetaBC_l, double[:] zetaCA_l, double[:] zetaCB_l, double[:] zetaCC_l, double[:,::1] legs, double[:] w_mus, int nmu, int nl) noexcept nogil:
+    """Utility function to sum over l, mu in the exact estimators. This is a specialized version for the bispectrum."""
+    cdef int il,imu
+    cdef double musum, AAsum, ABsum, ACsum, BAsum, BBsum, BCsum, CAsum, CBsum, CCsum
+    musum = 0.
+    for imu in xrange(nmu):
+        AAsum = 0.
+        ABsum = 0.
+        ACsum = 0.
+        BAsum = 0.
+        BBsum = 0.
+        BCsum = 0.
+        CAsum = 0.
+        CBsum = 0.
+        CCsum = 0.
+        for il in xrange(nl):
+            AAsum += zetaAA_l[il]*legs[imu,il]
+            ABsum += zetaAB_l[il]*legs[imu,il]
+            ACsum += zetaAC_l[il]*legs[imu,il]
+            BAsum += zetaBA_l[il]*legs[imu,il]
+            BBsum += zetaBB_l[il]*legs[imu,il]
+            BCsum += zetaBC_l[il]*legs[imu,il]
+            CAsum += zetaCA_l[il]*legs[imu,il]
+            CBsum += zetaCB_l[il]*legs[imu,il]
+            CCsum += zetaCC_l[il]*legs[imu,il]
+        musum += (AAsum*BBsum*CCsum+AAsum*BCsum*CBsum+ABsum*BCsum*CAsum+ABsum*BAsum*CCsum+ACsum*BAsum*CBsum+ACsum*BBsum*CAsum)*w_mus[imu]
     return musum
 
 @cython.boundscheck(False)
