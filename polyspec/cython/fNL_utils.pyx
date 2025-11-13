@@ -76,16 +76,34 @@ cdef class fNL_utils:
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.cdivision(True)
-    cpdef double fnl_loc_sum(self, double[:] r_weights, double[:,::1] P1_maps, double[:,::1] P2_maps, double[:,::1] Q_maps):
-        """Compute Sum_i w_i P_i(r)^2Q_i(r) for maps P, Q."""
-        cdef int ir, ipix, nr = P1_maps.shape[0], npix = P1_maps.shape[1]
+    cpdef double fnl_sum(self, double[:] r_weights, double[:,::1] A_maps, double[:,::1] B_maps, double[:,::1] C_maps):
+        """Compute Sum_i w_i A_i(r)B_i(r)C_i(r) for maps A, B, C."""
+        cdef int ir, ipix, nr = A_maps.shape[0], npix = A_maps.shape[1]
         cdef double tmp_sum, out = 0.
 
         for ir in prange(nr, nogil=True, schedule='static', num_threads=self.nthreads):
             tmp_sum = 0.
             for ipix in xrange(npix):
-                tmp_sum = tmp_sum + P1_maps[ir,ipix]*P2_maps[ir,ipix]*Q_maps[ir,ipix]
+                tmp_sum = tmp_sum + A_maps[ir,ipix]*B_maps[ir,ipix]*C_maps[ir,ipix]
             out += r_weights[ir]*tmp_sum
+        return out
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.cdivision(True)
+    cpdef double neural_sum(self, double[:] r_weights, double[:] neural_weights, double[:,:,::1] A_maps, double[:,:,::1] B_maps, double[:,:,::1] C_maps):
+        """Compute Sum_n W_n Sum_i w_i An_i(r)Bn_i(r)Cn_i(r) for maps A, B, C."""
+        cdef int iterm, ir, ipix, nterm = A_maps.shape[0], nr = A_maps.shape[1], npix = A_maps.shape[2]
+        cdef double tmp_sum, tmp_sum2, out = 0.
+
+        for ir in prange(nr, nogil=True, schedule='static', num_threads=self.nthreads):
+            tmp_sum2 = 0.
+            for iterm in xrange(nterm):
+                tmp_sum = 0.
+                for ipix in xrange(npix):
+                    tmp_sum = tmp_sum + A_maps[iterm,ir,ipix]*B_maps[iterm,ir,ipix]*C_maps[iterm,ir,ipix]
+                tmp_sum2 += neural_weights[iterm]*tmp_sum
+            out += r_weights[ir]*tmp_sum2
         return out
 
     @cython.boundscheck(False)

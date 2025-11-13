@@ -395,6 +395,92 @@ cpdef void p_integral(double[:] k_arr, double[:] Pzeta_arr, double[:,:,::1] Tl_a
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
+cpdef void p_integral_general(double[:] k_arr, double[:] Pzeta_arr, double pow, double[:,:,::1] Tl_arr, double[:,:,::1] jlkr, 
+                     int lmin, int lmax, int nthreads, np.ndarray[np.float64_t,ndim=3] _integs):
+    """Compute the p_l^X(r) integral including a factor of P(k)^{pow} with the trapezium rule."""
+    
+    cdef int il, ik, ir, nk = len(k_arr), nr = _integs.shape[2], nl = lmax+1-lmin, npol = len(Tl_arr)
+    cdef double[:] kprod = np.zeros((nk),dtype=np.float64)
+    cdef double lpref, f_low, f_high, ksum
+    cdef double[:,:,::1] integs = _integs
+
+    # Compute k-dependent piece
+    for ik in prange(nk,nogil=True,schedule='static',num_threads=nthreads):
+        kprod[ik] = 2./M_PI*k_arr[ik]*k_arr[ik]/2.*dpow(Pzeta_arr[ik], pow)
+    
+    # Perform sum for each polarization
+    for il in prange(nl,nogil=True,schedule='static',num_threads=nthreads):
+        lpref = dpow(-1.,lmin+il)
+        
+        # Iterate over r
+        for ir in xrange(nr):
+            
+            # Compute trapezium rule
+            f_low = kprod[0]*Tl_arr[0,lmin+il,0]*jlkr[il,ir,0]
+            for ik in xrange(1,nk):
+                f_high = kprod[ik]*Tl_arr[0,lmin+il,ik]*jlkr[il,ir,ik]
+                integs[lmin+il,0,ir] += lpref*(k_arr[ik]-k_arr[ik-1])*(f_low+f_high)
+                f_low = f_high
+    if npol>1:
+        for il in prange(nl,nogil=True,schedule='static',num_threads=nthreads):
+            lpref = dpow(-1.,lmin+il)
+            
+            # Iterate over r
+            for ir in xrange(nr):
+                
+                # Compute trapezium rule
+                f_low = kprod[0]*Tl_arr[1,lmin+il,0]*jlkr[il,ir,0]
+                for ik in xrange(1,nk):
+                    f_high = kprod[ik]*Tl_arr[1,lmin+il,ik]*jlkr[il,ir,ik]
+                    integs[lmin+il,1,ir] += lpref*(k_arr[ik]-k_arr[ik-1])*(f_low+f_high)
+                    f_low = f_high
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cpdef void f_integral(double[:] k_arr, double[:] alpha_arr, double[:] Pzeta_arr, double[:,:,::1] Tl_arr, double[:,:,::1] jlkr, 
+                     int lmin, int lmax, int nthreads, np.ndarray[np.float64_t,ndim=3] _integs):
+    """Compute the general f_l^X[alpha](r) integral with the trapezium rule."""
+    
+    cdef int il, ik, ir, nk = len(k_arr), nr = _integs.shape[2], nl = lmax+1-lmin, npol = len(Tl_arr)
+    cdef double[:] kprod = np.zeros((nk),dtype=np.float64)
+    cdef double lpref, f_low, f_high, ksum
+    cdef double[:,:,::1] integs = _integs
+
+    # Compute k-dependent piece
+    for ik in prange(nk,nogil=True,schedule='static',num_threads=nthreads):
+        kprod[ik] = 2./M_PI*k_arr[ik]*k_arr[ik]/2.*Pzeta_arr[ik]**(2./3.)
+    
+    # Perform sum for each polarization
+    for il in prange(nl,nogil=True,schedule='static',num_threads=nthreads):
+        lpref = dpow(-1.,lmin+il)
+        
+        # Iterate over r
+        for ir in xrange(nr):
+            
+            # Compute trapezium rule
+            f_low = kprod[0]*Tl_arr[0,lmin+il,0]*jlkr[il,ir,0]*alpha_arr[0]
+            for ik in xrange(1,nk):
+                f_high = kprod[ik]*Tl_arr[0,lmin+il,ik]*jlkr[il,ir,ik]*alpha_arr[ik]
+                integs[lmin+il,0,ir] += lpref*(k_arr[ik]-k_arr[ik-1])*(f_low+f_high)
+                f_low = f_high
+    if npol>1:
+        for il in prange(nl,nogil=True,schedule='static',num_threads=nthreads):
+            lpref = dpow(-1.,lmin+il)
+            
+            # Iterate over r
+            for ir in xrange(nr):
+                
+                # Compute trapezium rule
+                f_low = kprod[0]*Tl_arr[1,lmin+il,0]*jlkr[il,ir,0]*alpha_arr[0]
+                for ik in xrange(1,nk):
+                    f_high = kprod[ik]*Tl_arr[1,lmin+il,ik]*jlkr[il,ir,ik]*alpha_arr[ik]
+                    integs[lmin+il,1,ir] += lpref*(k_arr[ik]-k_arr[ik-1])*(f_low+f_high)
+                    f_low = f_high
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
 cpdef void r_integral(double[:] k_arr, double[:] Pzeta_arr, double[:,:,::1] Tl_arr, double[:,:,::1] jlkr, 
                      int lmin, int lmax, int nthreads, np.ndarray[np.float64_t,ndim=3] _integs):
     """Compute the r_l^X(r) integral with the trapezium rule."""

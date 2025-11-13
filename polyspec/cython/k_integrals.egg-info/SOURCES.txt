@@ -1,0 +1,6 @@
+k_integrals.c
+setup.py
+k_integrals.egg-info/PKG-INFO
+k_integrals.egg-info/SOURCES.txt
+k_integrals.egg-info/dependency_links.txt
+k_integrals.egg-info/top_level.txt

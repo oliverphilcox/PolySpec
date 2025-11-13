@@ -17,7 +17,7 @@ class BSpecTemplate():
     - base: PolyBin class
     - mask: HEALPix mask applied to data. We can optionally specify a vector of three masks for [T, Q, U].
     - applySinv: function which returns S^-1 ~ P^dag Cov^{-1} in harmonic space, when applied to a given input map, where P = Mask * Beam.
-    - templates: types of templates to compute e.g. [fNL-loc, isw-lensing]
+    - templates: types of templates to compute e.g. [fNL-loc, fNL-eq, isw-lensing, neural]
     - k_arr, Tl_arr: k-array, plus T- and (optionally) E-mode transfer functions for all ell. Required for all primordial templates.
     - lmin, lmax: minimum/maximum ell (inclusive)
     - ns, As, k_pivot: primordial power spectrum parameters
@@ -25,8 +25,9 @@ class BSpecTemplate():
     - C_Tphi, C_Ephi: cross spectrum of temperature/polarization and lensing  [C^Tphi_0, C^Tphi_1, etc.]. Required if 'isw-lensing' is in templates.
     - C_lens_weight: dictionary of lensed power spectra (TT, TE, etc.). Required if 'isw-lensing' is in templates.
     - r_star, r_hor: Comoving distance to last-scattering and the horizon (default: Planck 2018 values).
+    - neural_input: Input neural-network bispectrum templates (only used if "neural" is in templates). These must take the form (weights, alpha, beta, [gamma]), where alpha/beta/gamma are functions of k and i, for i = 0 ... len(weights)-1.
     """
-    def __init__(self, base, mask, applySinv, templates, lmin, lmax,  k_arr=[], Tl_arr=[], r_arr=[], ns=0.96, As=2.1e-9, k_pivot=0.05, r_values = [], r_weights = {}, C_Tphi=[], C_Ephi=[], C_lens_weight = {}, r_star=None, r_hor=None):
+    def __init__(self, base, mask, applySinv, templates, lmin, lmax,  k_arr=[], Tl_arr=[], r_arr=[], ns=0.96, As=2.1e-9, k_pivot=0.05, r_values = [], r_weights = {}, C_Tphi=[], C_Ephi=[], C_lens_weight = {}, r_star=None, r_hor=None, neural_inputs=None):
         # Read in attributes
         self.base = base
         self.mask = mask
@@ -39,6 +40,7 @@ class BSpecTemplate():
         self.ns = ns
         self.As = As
         self.k_pivot = k_pivot
+        self.neural_inputs = neural_inputs
         
         # Create primordial power spectrum function
         print("Primordial Spectrum: n_s = %.2f, A_s = %.2e, k_pivot = %.2f"%(self.ns, self.As, self.k_pivot));
@@ -137,7 +139,7 @@ class BSpecTemplate():
         """Check input templates and log which quantities to compute."""
         
         # Check correct templates are being used and print them
-        self.all_templates_1d = ['fNL-loc']
+        self.all_templates_1d = ['fNL-loc','fNL-eq','neural']
         self.all_templates = self.all_templates_1d+['isw-lensing']
         ii = 0
         for t in templates:
@@ -169,6 +171,28 @@ class BSpecTemplate():
         if 'fNL-loc' in templates:
             self.to_compute.append(['p','q'])
             self.ints_1d = True
+        if 'fNL-eq' in templates:
+            self.to_compute.append(['p','q','r1','r2'])
+            self.ints_1d = True
+        if 'neural' in templates:
+            # Check inputs
+            assert self.neural_inputs is not None, "Must supply neural network inputs!"
+            assert len(self.neural_inputs) in [3, 4], "Neural network inputs must be of the form (weights, alpha, beta) or (weights, alpha, beta, gamma)"
+            neural_weights = self.neural_inputs[0]
+            if len(neural_weights.shape)==2:
+                if neural_weights.shape[1]==1:
+                    neural_weights = neural_weights.ravel()
+                else:
+                    raise Exception("Unknown weight shape %s supplied!"%(neural_weights.shape))
+            self.neural_weights = np.asarray(neural_weights,dtype=np.float64,order='C')
+            self.neural_terms = len(self.neural_weights)
+            if len(self.neural_inputs) == 3:
+                self.neural_cyclic = True
+                print("Using a cyclic neural network input with %d terms"%self.neural_terms)
+            else:
+                self.neural_cyclic = False
+                print("Using a neural network input with %d terms"%self.neural_terms)
+            self.ints_1d = True
         if 'isw-lensing' in templates:
             # Check inputs
             assert len(C_Tphi)>0, "Must supply temperature-lensing cross spectrum!"
@@ -192,7 +216,8 @@ class BSpecTemplate():
             self.to_compute.append(['u','v','v-isw'])
         
         # Identify unique components 
-        self.to_compute = np.unique(np.concatenate(self.to_compute))
+        if len(self.to_compute)>0:
+            self.to_compute = np.unique(np.concatenate(self.to_compute))
         
         # Create filtering for minimum ls
         self.lminfilt = self.base.l_arr[self.base.l_arr<=self.lmax]>=self.lmin
@@ -270,7 +295,10 @@ class BSpecTemplate():
         if ints_1d:
             if hasattr(self, 'plXs'): delattr(self, 'plXs')
             if hasattr(self, 'qlXs'): delattr(self, 'qlXs')
-        
+            if hasattr(self, 'alpha_lXs'): delattr(self, 'alpha_lXs')
+            if hasattr(self, 'beta_lXs'): delattr(self, 'beta_lXs')
+            if hasattr(self, 'gamma_lXs'): delattr(self, 'gamma_lXs')
+            
         # Precompute all spherical Bessel functions on a regular grid
         print("Precomputing Bessel functions")
         max_kr = max(self.k_arr)*max(self.r_arr)
@@ -307,6 +335,37 @@ class BSpecTemplate():
             self.plXs = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
             p_integral(self.k_arr, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.plXs)
             
+        if 'r1' in self.to_compute and ints_1d:
+            
+            # Compute r integrals in Cython
+            print("Computing r1_l^X(r) integrals")
+            self.r1lXs = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            p_integral_general(self.k_arr, Pzeta_arr, 1./3., self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.r1lXs)
+            
+        if 'r2' in self.to_compute and ints_1d:
+            
+            # Compute r2 integrals in Cython
+            print("Computing r2_l^X(r) integrals")
+            self.r2lXs = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            p_integral_general(self.k_arr, Pzeta_arr, 2./3., self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.r2lXs)
+        
+        if self.neural_inputs is not None:
+            
+            # Compute neural integrals in Cython
+            print("Computing f_l^X[alpha](r) integrals")
+            self.alpha_lXs = np.zeros((self.neural_terms,self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            self.beta_lXs  = np.zeros((self.neural_terms,self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            if not self.neural_cyclic:
+                self.gamma_lXs = np.zeros((self.neural_terms,self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            for i in range(self.neural_terms):
+                alphas = np.asarray(np.ravel([self.neural_inputs[1](np.float32(kk),i) for kk in self.k_arr]), dtype=np.float64)
+                betas = np.asarray(np.ravel([self.neural_inputs[2](np.float32(kk),i) for kk in self.k_arr]), dtype=np.float64)
+                f_integral(self.k_arr, alphas, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.alpha_lXs[i])
+                f_integral(self.k_arr, betas, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.beta_lXs[i])
+                if not self.neural_cyclic:
+                    gammas = np.asarray(np.ravel([self.neural_inputs[3](np.float32(kk),i) for kk in self.k_arr]), dtype=np.float64)
+                    f_integral(self.k_arr, gammas, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.gamma_lXs[i])
+            
         if ints_1d: del jlkr
         
         # Define Cython utility class
@@ -325,7 +384,7 @@ class BSpecTemplate():
             raise Exception("Radial arrays have not been computed!")
         
         # Sum over polarizations (only filling non-zero elements)
-        summ = np.zeros((len(flX_arr[0,0]),len(self.lminfilt)),order='C',dtype='complex128')
+        summ = np.zeros((len(flX_arr[0,0]),len(self.lminfilt)),order='C',dtype=np.complex128)
         summ[:,self.lminfilt] = self.utils.apply_fl_weights(flX_arr, h_lm_filt, 1.)
         
         # Compute SHTs 
@@ -389,9 +448,6 @@ class BSpecTemplate():
             # Output array
             V = np.zeros((1+2*self.pol,self.base.Npix),dtype=np.complex128,order='C')
             
-            # print("REMOVE!")
-            # h_lm_filt[[1,2]] = 0.
-            
             # Spin-0, X = T
             pref = np.sqrt(self.ls*(self.ls+1.))
             wienerT = (self.C_lens_weight['TT'][self.ls]*h_lm_filt[0]+self.C_lens_weight['TE'][self.ls]*h_lm_filt[1])
@@ -454,6 +510,12 @@ class BSpecTemplate():
         elif filtering=='Q':
             return np.asarray([self._compute_weighted_maps(imap, self.qlXs) for imap in input_maps],order='C')     
         
+        elif filtering=='R1':
+            return np.asarray([self._compute_weighted_maps(imap, self.r1lXs) for imap in input_maps],order='C')     
+        
+        elif filtering=='R2':
+            return np.asarray([self._compute_weighted_maps(imap, self.r2lXs) for imap in input_maps],order='C')     
+        
         elif filtering=='U':
             return np.asarray([self._compute_lensing_U_map(imap) for imap in input_maps], order='C')        
             
@@ -463,6 +525,15 @@ class BSpecTemplate():
         elif filtering=='V-ISW':
             return np.asarray([self._compute_isw_V_map(imap) for imap in input_maps], order='C')        
         
+        elif filtering=='neural-alpha':
+            return np.asarray([[self._compute_weighted_maps(imap, self.alpha_lXs[i]) for imap in input_maps] for i in range(self.neural_terms)], order='C')
+        
+        elif filtering=='neural-beta':
+            return np.asarray([[self._compute_weighted_maps(imap, self.beta_lXs[i]) for imap in input_maps] for i in range(self.neural_terms)], order='C')
+
+        elif filtering=='neural-gamma':
+            return np.asarray([[self._compute_weighted_maps(imap, self.gamma_lXs[i]) for imap in input_maps] for i in range(self.neural_terms)], order='C')
+
         else:
             raise Exception("Filtering %s is not implemented!"%filtering)
 
@@ -473,11 +544,18 @@ class BSpecTemplate():
         output = {}
         
         # Compute local maps
+        if 'p' in self.to_compute:
+            output['p'] = self._compute_weighted_maps(input_map, self.plXs)
+              
         if 'q' in self.to_compute:
             output['q'] = self._compute_weighted_maps(input_map, self.qlXs)
         
-        if 'p' in self.to_compute:
-            output['p'] = self._compute_weighted_maps(input_map, self.plXs)
+        # Compute equilateral maps
+        if 'r1' in self.to_compute:
+            output['r1'] = self._compute_weighted_maps(input_map, self.r1lXs)
+            
+        if 'r2' in self.to_compute:
+            output['r2'] = self._compute_weighted_maps(input_map, self.r2lXs) 
               
         # Compute lensing maps
         if 'u' in self.to_compute:
@@ -488,7 +566,18 @@ class BSpecTemplate():
             
         if 'v-isw' in self.to_compute:
             output['v-isw'] = self._compute_isw_V_map(input_map)
-        
+            
+        if self.neural_inputs is not None:
+            output['neural-alpha'] = np.zeros((self.neural_terms, len(self.alpha_lXs[0,0,0]),self.base.Npix),order='C',dtype=np.float64)
+            output['neural-beta'] = np.zeros((self.neural_terms, len(self.beta_lXs[0,0,0]),self.base.Npix),order='C',dtype=np.float64)
+            if not self.neural_cyclic:
+                output['neural-gamma'] = np.zeros((self.neural_terms,len(self.gamma_lXs[0,0,0]),self.base.Npix),order='C',dtype=np.float64)
+            for i in range(self.neural_terms):
+                output['neural-alpha'][i] = self._compute_weighted_maps(input_map, self.alpha_lXs[i])
+                output['neural-beta'][i] = self._compute_weighted_maps(input_map, self.beta_lXs[i])
+                if not self.neural_cyclic:
+                    output['neural-gamma'][i] = self._compute_weighted_maps(input_map, self.gamma_lXs[i])
+            
         return output
     
     ### SIMULATION FUNCTIONS
@@ -652,12 +741,26 @@ class BSpecTemplate():
                 if verb: print("\tComputing fNL-loc Fisher matrix derivative exactly")
                 deriv_matrix = np.asarray(fisher_deriv_fNL_loc(self.plXs, self.qlXs, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
                                     legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+               
+            elif template=='fNL-eq':
+                if verb: print("\tComputing fNL-eq Fisher matrix derivative exactly")
+                deriv_matrix = np.asarray(fisher_deriv_fNL_eq(self.plXs, self.qlXs, self.r1lXs, self.r2lXs, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                                    legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+                
+            elif template=='neural':
+                if verb: print("\tComputing neural Fisher matrix derivative exactly")
+                if not self.neural_cyclic:
+                    deriv_matrix = np.asarray(fisher_deriv_neural(self.alpha_lXs, self.beta_lXs, self.gamma_lXs, self.neural_weights, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                                        legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+                else:
+                    deriv_matrix = np.asarray(fisher_deriv_neural_cyclic(self.alpha_lXs, self.beta_lXs, self.neural_weights, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                                        legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
                 
             else:
                 raise Exception("Template %s not implemented!"%template)
                 
             output[template] = np.sum(deriv_matrix), deriv_matrix
-
+            
         self.timers['analytic_fisher'] += time.time()-t_init
 
         return output
@@ -703,12 +806,34 @@ class BSpecTemplate():
             
             if t=='fNL-loc':
                 # fNL-local template
-                print("Computing fNL template")
+                print("Computing fNL-local template")
                 
                 t_init = time.time()
-                b3_num[ii] = 3./5.*self.utils.fnl_loc_sum(self.r_weights[t], proc_maps['p'], proc_maps['p'], proc_maps['q'])*self.base.A_pix
+                b3_num[ii] = 3./5.*self.utils.fnl_sum(self.r_weights[t], proc_maps['p'], proc_maps['p'], proc_maps['q'])*self.base.A_pix
                 self.timers['fNL_summation'] += time.time()-t_init
 
+            elif t=='fNL-eq':
+                # fNL-eq template
+                print("Computing fNL-eq template")
+                
+                t_init = time.time()
+                summ  = 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['r1'], proc_maps['r2'], proc_maps['p'])
+                summ -= 3*self.utils.fnl_sum(self.r_weights[t], proc_maps['p'], proc_maps['p'], proc_maps['q'])
+                summ -= 2*self.utils.fnl_sum(self.r_weights[t], proc_maps['r2'], proc_maps['r2'], proc_maps['r2'])
+                b3_num[ii] = 3./5.*summ*self.base.A_pix
+                self.timers['fNL_summation'] += time.time()-t_init
+
+            elif t=='neural':
+                # Neural-network input template
+                print("Computing neural template")
+                
+                t_init = time.time()
+                if not self.neural_cyclic:
+                    b3_num[ii] = 3./5.*self.utils.neural_sum(self.r_weights[t], self.neural_weights, proc_maps['neural-alpha'], proc_maps['neural-beta'], proc_maps['neural-gamma'])*self.base.A_pix 
+                else: 
+                    b3_num[ii] = 3./5.*self.utils.neural_sum(self.r_weights[t], self.neural_weights, proc_maps['neural-alpha'], proc_maps['neural-beta'], proc_maps['neural-beta'])*self.base.A_pix
+                self.timers['fNL_summation'] += time.time()-t_init
+                
             elif t=='isw-lensing':
                 # ISW-Lensing template
                 print("Computing ISW-lensing template")
@@ -735,11 +860,39 @@ class BSpecTemplate():
                         t_init = time.time()
                         
                         # Sum over permutations
-                        summ  = 2.*self.utils.fnl_loc_sum(self.r_weights[t], proc_maps['p'], this_proc_maps['p'], this_proc_maps['q'])
-                        summ += self.utils.fnl_loc_sum(self.r_weights[t], this_proc_maps['p'], this_proc_maps['p'], proc_maps['q'])
+                        summ  = 2.*self.utils.fnl_sum(self.r_weights[t], proc_maps['p'], this_proc_maps['p'], this_proc_maps['q'])
+                        summ += self.utils.fnl_sum(self.r_weights[t], this_proc_maps['p'], this_proc_maps['p'], proc_maps['q'])
                         b1_num[ii] += -3./5.*summ*self.base.A_pix/self.N_it
                         self.timers['fNL_summation'] += time.time()-t_init
                         
+                    if t=='fNL-eq':
+                        t_init = time.time()
+                        
+                        # Sum over permutations
+                        summ  = 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['r1'], this_proc_maps['r2'], this_proc_maps['p'])
+                        summ += 6*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['r1'], proc_maps['r2'], this_proc_maps['p'])
+                        summ += 6*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['r1'], this_proc_maps['r2'], proc_maps['p'])
+                        summ -= 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['p'], this_proc_maps['p'], this_proc_maps['q'])
+                        summ -= 3*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['p'], this_proc_maps['p'], proc_maps['q'])
+                        summ -= 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['r2'], this_proc_maps['r2'], this_proc_maps['r2'])
+                        b1_num[ii] += -3./5.*summ*self.base.A_pix/self.N_it
+                        self.timers['fNL_summation'] += time.time()-t_init
+                        
+                    if t=='neural':
+                        t_init = time.time()
+                        
+                        # Sum over permutations
+                        if not self.neural_cyclic:
+                            summ  = self.utils.neural_sum(self.r_weights[t], self.neural_weights, this_proc_maps['neural-alpha'], this_proc_maps['neural-beta'], proc_maps['neural-gamma'])
+                            summ += self.utils.neural_sum(self.r_weights[t], self.neural_weights, this_proc_maps['neural-alpha'], this_proc_maps['neural-gamma'], proc_maps['neural-beta'])
+                            summ += self.utils.neural_sum(self.r_weights[t], self.neural_weights, this_proc_maps['neural-beta'], this_proc_maps['neural-gamma'], proc_maps['neural-alpha'])
+                            b1_num[ii] += -3./5.*summ*self.base.A_pix/self.N_it
+                        else:
+                            summ  = 2.*self.utils.neural_sum(self.r_weights[t], self.neural_weights, this_proc_maps['neural-alpha'], this_proc_maps['neural-beta'], proc_maps['neural-beta'])
+                            summ += self.utils.neural_sum(self.r_weights[t], self.neural_weights, this_proc_maps['neural-beta'], this_proc_maps['neural-beta'], proc_maps['neural-alpha'])
+                            b1_num[ii] += -3./5.*summ*self.base.A_pix/self.N_it
+                        self.timers['fNL_summation'] += time.time()-t_init
+                    
                     if t=='isw-lensing':
                         t_init = time.time()
                
@@ -759,7 +912,7 @@ class BSpecTemplate():
 
     ### OPTIMIZATION
     @_timer_func('optimization')
-    def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_split=None, split_index=None, initial_r_points=None, verb=False):
+    def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_split=None, split_index=None, initial_r_points=None, verb=False, ideal_only=False):
         """
         Compute the 1D radial sampling points and weights via optimization (as in Smith & Zaldarriaga 06), up to some tolerance in the Fisher distance.
         Optimization will be done for each template, analytically computing the 'distance' between template approximations
@@ -775,6 +928,7 @@ class BSpecTemplate():
             - N_split (optional): Number of chunks to split the optimization into. If None, no splitting is performed.
             - split_index (optional): Index of the chunk to optimize. 
             - initial_r_points (optional): Starting set of radial points (used for the final optimization step).
+            - ideal_only (optional): Return the ideal Fisher matrix predictions without performing optimization.
         
         """
         assert self.ints_1d, "No 1D optimization is required for these templates!"
@@ -830,6 +984,11 @@ class BSpecTemplate():
         for t in ordered_templates:
             self.ideal_fisher[t] = derivs[t][0]
         
+        # Optionally exit and return ideal Fisher matrices
+        if ideal_only:
+            if verb: print("## Not performing optimization!")
+            return self.ideal_fisher
+            
         for template in ordered_templates:
             
             if verb: print("\nRunning optimization for template %s"%template)
@@ -876,7 +1035,6 @@ class BSpecTemplate():
                 else:
                     next_ind = inds_init[notinds][np.argsort(np.sum(G_mat,axis=1)**2/np.diag(G_mat))[-1]]
                 inds.append(next_ind)
-                print(inds)
                 
                 # Set-up memory
                 w_vals_old = w_vals
@@ -1010,6 +1168,12 @@ class BSpecTemplate():
             if 'p' in self.to_compute:
                 if verb: print("Creating P maps")
                 P_maps = self._filter_pair(Uinv_a_lms, 'P')   
+            if 'r1' in self.to_compute:
+                if verb: print("Creating R1 maps")
+                R1_maps = self._filter_pair(Uinv_a_lms, 'R1')   
+            if 'r2' in self.to_compute:
+                if verb: print("Creating R2 maps")
+                R2_maps = self._filter_pair(Uinv_a_lms, 'R2')   
             if 'u' in self.to_compute:
                 if verb: print("Creating U maps")
                 U_maps = self._filter_pair(Uinv_a_lms, 'U')
@@ -1019,6 +1183,12 @@ class BSpecTemplate():
             if 'v-isw' in self.to_compute:
                 if verb: print("Creating ISW V maps")
                 V_isw_maps = self._filter_pair(Uinv_a_lms, 'V-ISW')
+            if self.neural_inputs is not None:
+                if verb: print("Creating neural maps")
+                neural_alphas = self._filter_pair(Uinv_a_lms, 'neural-alpha')
+                neural_betas = self._filter_pair(Uinv_a_lms, 'neural-beta')
+                if not self.neural_cyclic:
+                    neural_gammas = self._filter_pair(Uinv_a_lms, 'neural-gamma')
             
             # Define output arrays (Q11, Q22)
             Qs = np.zeros((2,len(self.templates),1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128,order='C')
@@ -1033,7 +1203,35 @@ class BSpecTemplate():
                     for index in [0,1]:
                         Qs[index,ii]  = 12./5.*self._transform_maps(self.utils.multiply(P_maps[index],Q_maps[index]),self.plXs,self.r_weights[t])
                         Qs[index,ii] += 6./5.*self._transform_maps(self.utils.multiply(P_maps[index],P_maps[index]),self.qlXs,self.r_weights[t])
+                
+                if t=='fNL-eq':
                     
+                    if verb: print("Computing Q-derivative for fNL-eq")
+
+                    # Iterate over both the 11 and 22 pieces
+                    for index in [0,1]:
+                        Qs[index,ii]  = 36./5.*self._transform_maps(self.utils.multiply(R1_maps[index],R2_maps[index]),self.plXs,self.r_weights[t])
+                        Qs[index,ii] += 36./5.*self._transform_maps(self.utils.multiply(P_maps[index],R2_maps[index]),self.r1lXs,self.r_weights[t])
+                        Qs[index,ii] += 36./5.*self._transform_maps(self.utils.multiply(P_maps[index],R1_maps[index]),self.r2lXs,self.r_weights[t])
+                        Qs[index,ii] -= 36./5.*self._transform_maps(self.utils.multiply(P_maps[index],Q_maps[index]),self.plXs,self.r_weights[t])
+                        Qs[index,ii] -= 18./5.*self._transform_maps(self.utils.multiply(P_maps[index],P_maps[index]),self.qlXs,self.r_weights[t])
+                        Qs[index,ii] -= 36./5.*self._transform_maps(self.utils.multiply(R2_maps[index],R2_maps[index]),self.r2lXs,self.r_weights[t])
+                        
+                if t=='neural':
+                    
+                    if verb: print("Computing Q-derivative for neural fNL")
+
+                    # Iterate over both the 11 and 22 pieces
+                    for index in [0,1]:
+                        for iterm in range(self.neural_terms):
+                            if not self.neural_cyclic:
+                                Qs[index,ii] += 6./5.*self.neural_weights[iterm]*self._transform_maps(self.utils.multiply(neural_alphas[iterm][index],neural_betas[iterm][index]),self.gamma_lXs[iterm],self.r_weights[t])
+                                Qs[index,ii] += 6./5.*self.neural_weights[iterm]*self._transform_maps(self.utils.multiply(neural_betas[iterm][index],neural_gammas[iterm][index]),self.alpha_lXs[iterm],self.r_weights[t])
+                                Qs[index,ii] += 6./5.*self.neural_weights[iterm]*self._transform_maps(self.utils.multiply(neural_gammas[iterm][index],neural_alphas[iterm][index]),self.beta_lXs[iterm],self.r_weights[t])
+                            else:
+                                Qs[index,ii] += 12./5.*self.neural_weights[iterm]*self._transform_maps(self.utils.multiply(neural_alphas[iterm][index],neural_betas[iterm][index]),self.beta_lXs[iterm],self.r_weights[t])
+                                Qs[index,ii] += 6./5.*self.neural_weights[iterm]*self._transform_maps(self.utils.multiply(neural_betas[iterm][index],neural_betas[iterm][index]),self.alpha_lXs[iterm],self.r_weights[t])
+                
                 if t=='isw-lensing':
                     if verb: print("Computing Q-derivative for isw-lensing")
                     
