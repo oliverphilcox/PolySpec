@@ -24,7 +24,7 @@ class TSpecTemplate():
     - k_arr, Tl_arr: k-array, plus T- and (optionally) E-mode transfer functions for all ell. Required for all primordial templates.
     - lmin, lmax: minimum/maximum ell (inclusive)
     - Lmin, Lmax: minimum/maximum internal L (inclusive)
-    - Lmin_lens, Lmax_lens: minimum/maximum internal L for lensing (inclusive)
+    - Lmin_lens, Lmax_lens: minimum/maximum internal L for lensing (inclusive). Ignored if L_edges_lens is specified. 
     - ns, As, k_pivot: primordial power spectrum parameters. 
     - r_values, r_weights: radial sampling points and weights for 1-dimensional integrals
     - rtau_values, rtau_weights: list of (r,tau) sampling points for 2-dimensional EFTI integrals
@@ -35,11 +35,12 @@ class TSpecTemplate():
     - C_lens_weight: dictionary of lensed power spectra (TT, TE, etc.). Required if 'lensing' is in templates.
     - K_coll, k_coll: cut-off scale for collider templates (restricting to k > k_coll, K < K_coll (default: 0.01, 0.01).
     - r_star, r_hor: Comoving distance to last-scattering and the horizon (default: Planck 2018 values).
+    - L_edges_lens: Edges of L-bins to use in the lensing estimator (default: single bin [Lmin_lens, Lmax_lens+1).).
     """
     def __init__(self, base, mask, applySinv, templates, lmin, lmax, k_arr=[], Tl_arr=[], 
                  Lmin=None, Lmax=None, Lmin_lens=None, Lmax_lens=None, ns=0.96, As=2.1e-9, k_pivot=0.05, 
                  r_values = [], r_weights = {}, rtau_values = [], rtau_weights = {}, 
-                 C_phi=[], C_Tphi=[], C_Tphi_eff=[], C_lens_weight = {}, K_coll=0.1, k_coll=0.1, r_star=None, r_hor=None):
+                 C_phi=[], C_Tphi=[], C_Tphi_eff=[], C_lens_weight = {}, K_coll=0.1, k_coll=0.1, r_star=None, r_hor=None, L_edges_lens=[]):
         # Read in attributes
         self.base = base
         self.mask = mask
@@ -92,6 +93,12 @@ class TSpecTemplate():
         
         # Check lensing L ranges
         if 'lensing' in self.templates:
+            if len(L_edges_lens)>0:
+                assert (np.sort(L_edges_lens)==np.asarray(L_edges_lens)).all(), "L_edges_lens must be sorted!"
+                assert (np.unique(L_edges_lens)==np.asarray(L_edges_lens)).all(), "L_edges_lens must not contain repeated edges!"
+                Lmin_lens = L_edges_lens[0]
+                Lmax_lens = L_edges_lens[-1]-1
+                self.L_edges_lens = L_edges_lens
             if Lmin_lens==None:
                 if np.any(['gNL' in t for t in self.templates]):
                     self.Lmin_lens = 1
@@ -116,6 +123,7 @@ class TSpecTemplate():
         
         # Check ISW-lensing L ranges
         if 'isw-lensing' in self.templates:
+            if len(L_edges_lens)>0: raise Exception("Binned ISW-lensing not yet implemented!") 
             if Lmin_lens==None:
                 self.Lmin_lens = 1
             else:
@@ -2070,7 +2078,7 @@ class TSpecTemplate():
     def _weight_Q_maps(self, tmp_Q, weighting='Ainv'):
         """Apply inplace weighting to a Q map to form output array. This includes factors of S^-1.P if necessary."""
         
-        for index in range(len(self.templates)):
+        for index in range(len(tmp_Q)):
             if weighting=='Ainv':
                 # Construct l-space map down to l=0
                 full_Q = np.zeros((1+2*self.pol,len(self.lminfilt)),dtype=np.complex128)
@@ -2359,7 +2367,7 @@ class TSpecTemplate():
                 output.append(apply_ideal_weight(dQ4, self.Cinv, self.m_weight, self.base.nthreads))
         
         return output
-    
+
     ### NUMERATOR
     @_timer_func('numerator')
     def Tl_numerator(self, data, include_disconnected_term=True, verb=False, input_type='map'):
@@ -3068,6 +3076,145 @@ class TSpecTemplate():
                             t0_num[ii] += 3./24.*summ/self.N_it*self.base.A_pix
                         self.timers['gNL_summation'] += time.time()-t_init
 
+            # Load t0 from memory, if already computed
+            if not compute_t0:
+                t0_num = self.t0_num
+            else:
+                self.t0_num = t0_num
+
+        if include_disconnected_term:
+            t_num = t4_num+t2_num+t0_num
+        else:
+            t_num = t4_num
+
+        return t_num
+    
+    ### NUMERATOR
+    @_timer_func('numerator')
+    def Tl_numerator_lensing(self, data, include_disconnected_term=True, verb=False, input_type='map'):
+        """
+        Compute the numerator of the quasi-optimal lensing trispectrum estimator, given some data (either in map or harmonic space).
+
+        We can also optionally switch off the disconnected terms.
+        """
+        assert hasattr(self, 'L_edges_lens'), "Must specify L_edges_lens to use the lensing estimator!"
+        assert 'lensing' in self.templates
+        
+        # Check if simulations have been supplied
+        if not hasattr(self, 'preload') and include_disconnected_term:
+            raise Exception("Need to generate or specify bias simulations!")
+        
+        # Check input data format
+        if self.pol:
+            assert len(data)==3, "Data must contain T, Q, U components!"
+        else:
+            if input_type=='map':
+                assert (len(data)==1 and len(data[0])==self.base.Npix) or len(data)==self.base.Npix, "Data must contain T only!"
+        
+        # Decide whether to compute t0 term, if not already computed
+        if hasattr(self, 't0_num') and include_disconnected_term:
+            compute_t0 = False
+            if verb: print("Using precomputed t0 term")
+        else:
+            compute_t0 = True
+
+        # Apply S^-1 to data and transform to harmonic space
+        t_init = time.time()
+        h_data_lm = np.asarray(self.applySinv(data, input_type=input_type, lmax=self.lmax)[:,self.lminfilt], order='C')
+        self.timers['Sinv'] += time.time()-t_init
+                
+        # Compute all relevant weighted maps
+        proc_maps = self._apply_all_filters(h_data_lm)
+        
+        # Define 4-, 2- and 0-field arrays
+        N_lens = len(self.L_edges_lens)-1
+        if verb: print("Computing the lensing estimator in %d bins"%N_lens)
+        
+        t4_num = np.zeros(N_lens)
+        A_maps_dd = {}
+        if not include_disconnected_term:
+            print("## No subtraction of (parity-conserving) disconnected terms performed!")
+        else:
+            t2_num = np.zeros(N_lens)
+            if compute_t0: t0_num = np.zeros(N_lens)
+        
+        if verb: print("# Assembling trispectrum numerator (4-field term)")
+            
+        # Lensing template
+        if verb: print("Computing lensing template")
+
+        ## Compute estimator
+        Phi_dd = self._compute_lensing_Phi(proc_maps,proc_maps,isw=False)
+        Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+        Ms = self.base.m_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+        t_init = time.time()
+        summand = Ls*(Ls+1.)*Phi_dd*Phi_dd.conjugate()*(1.+(Ms>0))*self.C_phi[Ls]
+        for ii in range(N_lens):
+            LL_filt = (Ls>=self.L_edges_lens[ii])*(Ls<self.L_edges_lens[ii+1])
+            t4_num[ii] = 1./24.*np.sum(summand*LL_filt).real*12.
+        self.timers['lensing_summation'] += time.time()-t_init
+    
+        if include_disconnected_term:
+
+            # Iterate over simulations
+            for isim in range(self.N_it):
+                if not compute_t0:
+                    if verb: print("# Assembling 2-field trispectrum numerator for simulation pair %d of %d "%(isim+1,self.N_it))
+                else:
+                    if verb: print("# Assembling 2-field and 0-field trispectrum numerator for simulation pair %d of %d"%(isim+1,self.N_it))
+
+                # Load processed bias simulations
+                if self.preload:
+                    this_proc_a_maps = self.proc_a_maps[isim]
+                    this_proc_b_maps = self.proc_b_maps[isim]
+                else:
+                    this_proc_a_maps, this_proc_b_maps = self.load_sim_data(isim)
+                
+                # Define empty exchange dictionaries
+                A_maps_aa = {}
+                A_maps_ab_sym = {}
+                A_maps_bb = {}
+                A_maps_ad_sym = {}
+                A_maps_bd_sym = {}
+
+                # Lensing template
+                Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+                Ms = self.base.m_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+
+                # First set of fields
+                Phi_aa = self._compute_lensing_Phi(this_proc_a_maps,this_proc_a_maps)
+                Phi_ad = self._compute_lensing_Phi(this_proc_a_maps,proc_maps,add_sym=True)
+                Phi_sum = 4.*Phi_aa*Phi_dd.conjugate()+2.*Phi_ad*Phi_ad.conjugate()
+                del Phi_ad
+                
+                # Second set of fields
+                Phi_bb = self._compute_lensing_Phi(this_proc_b_maps,this_proc_b_maps)
+                Phi_bd = self._compute_lensing_Phi(this_proc_b_maps,proc_maps,add_sym=True)
+                Phi_sum += 4.*Phi_bb*Phi_dd.conjugate()+2.*Phi_bd*Phi_bd.conjugate()
+                del Phi_bd
+
+                # Assemble t2
+                t_init = time.time()
+                summand = Ls*(Ls+1.)*Phi_sum*(1.+(Ms>0))*self.C_phi[Ls]
+                for ii in range(N_lens):
+                    LL_filt = (Ls>=self.L_edges_lens[ii])*(Ls<self.L_edges_lens[ii+1])
+                    t2_num[ii] += -1./24.*np.sum(summand*LL_filt).real*3./self.N_it
+                self.timers['lensing_summation'] += time.time()-t_init
+       
+                if compute_t0:
+                    Phi_ab = self._compute_lensing_Phi(this_proc_a_maps,this_proc_b_maps,add_sym=True)
+                    Phi_sum = 4.*Phi_aa*Phi_bb.conjugate()+2.*Phi_ab*Phi_ab.conjugate()
+                    del Phi_ab, Phi_aa, Phi_bb
+                    
+                    # Assemble t0
+                    t_init = time.time()
+                    summand = Ls*(Ls+1.)*Phi_sum*(1.+(Ms>0))*self.C_phi[Ls]
+                    for ii in range(N_lens):
+                        LL_filt = (Ls>=self.L_edges_lens[ii])*(Ls<self.L_edges_lens[ii+1])                
+                        t0_num[ii] += 1./24.*np.sum(summand*LL_filt).real*3./self.N_it
+                    self.timers['lensing_summation'] += time.time()-t_init
+                del Phi_sum
+            
             # Load t0 from memory, if already computed
             if not compute_t0:
                 t0_num = self.t0_num
@@ -4460,6 +4607,200 @@ class TSpecTemplate():
                 self._weight_Q_maps(Qs[qindex], weighting)
             
             return Qs.reshape(4,len(self.templates),-1)
+
+        # Compute Q4 maps
+        if verb: print("\n# Computing Q4 map for S^-1 weighting")
+        Q4_Sinv = compute_Q4('Sinv')
+        if verb: print("\n# Computing Q4 map for A^-1 weighting")
+        Q4_Ainv = compute_Q4('Ainv')
+        
+        # Assemble Fisher matrix
+        if verb: print("Assembling Fisher matrix")
+        
+        # Compute Fisher matrix as an outer product
+        fish = self._assemble_fish(Q4_Sinv, Q4_Ainv, sym=False)
+        if verb: print("\n# Fisher matrix contribution %d computed successfully!"%seed)
+        
+        return fish
+
+    ### NORMALIZATION  
+    @_timer_func('fisher')
+    def compute_fisher_contribution_lensing(self, seed, verb=False):
+        """
+        This computes the contribution to the lensing Fisher matrix from a single pair of GRF simulations, created internally.
+        """
+        assert hasattr(self, 'L_edges_lens'), "Must specify L_edges_lens to use the lensing estimator!"
+        assert 'lensing' in self.templates
+        
+        N_lens = len(self.L_edges_lens)-1
+        print("Computing lensing Fisher matrix with seed %d in %d bins"%(seed,N_lens))
+        
+        # Compute two random realizations with known power spectrum, removing the beam
+        if verb: print("# Generating GRFs")
+        t_init = time.time()
+        a_maps = []
+        for ii in range(2):
+            if self.ones_mask:
+                a_maps.append(self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic',lmax=self.lmax, deconvolve_beam=True))
+            else:
+                # we can't truncate to l<=lmax here, since we need to apply the mask!
+                a_maps.append(self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic', deconvolve_beam=True))
+        self.timers['fish_grfs'] += time.time()-t_init
+        
+        # Define Q map code
+        def compute_Q4(weighting):
+            """
+            Assemble and return an array of Q4 maps in real- or harmonic-space, for S^-1 or A^-1 weighting. 
+
+            Schematically Q ~ (A[x]B[y,z]_lm + perms., and we dynamically compute each permutation of (A B)_lm.
+
+            The outputs are either Q_i or S^-1.P.Q_i.
+            """
+            
+            # Weight maps by S^-1.P or A^-1
+            if verb: print("Weighting maps")
+            
+            t_init = time.time()
+            if weighting=='Sinv':
+                # Compute S^-1.P.a
+                if self.ones_mask:
+                    Uinv_a_lms = [np.asarray(self.applySinv(self.base.beam_lm[:,self.base.l_arr<=self.lmax]*a_lm, input_type='harmonic', lmax=self.lmax)[:,self.lminfilt],order='C') for a_lm in a_maps]
+                else:
+                    Uinv_a_lms = [np.asarray(self.applySinv(self.mask*self.base.to_map(self.base.beam_lm*a_lm), lmax=self.lmax)[:,self.lminfilt],order='C') for a_lm in a_maps]
+                self.timers['Sinv'] += time.time()-t_init
+            elif weighting=='Ainv':
+                # Compute A^-1.a
+                if self.ones_mask:
+                    Uinv_a_lms = [np.asarray(self.base.applyAinv(a_lm, input_type='harmonic', lmax=self.lmax)[:,self.lminfilt],order='C') for a_lm in a_maps]
+                else:
+                    Uinv_a_lms = [np.asarray(self.base.applyAinv(a_lm, input_type='harmonic')[:,self.lfilt],order='C') for a_lm in a_maps]
+                self.timers['Ainv'] += time.time()-t_init 
+            
+            # Filter maps
+            if verb: print("Computing filtered maps")
+            if 'u' in self.to_compute:
+                if verb: print("Creating U maps")
+                U_maps = self._filter_pair(Uinv_a_lms, 'U')
+            if 'v' in self.to_compute:
+                if verb: print("Creating V maps")
+                V_maps = self._filter_pair(Uinv_a_lms, 'V')
+            
+            # Define output arrays (Q111, Q222, Q112, Q122)
+            Qs = np.zeros((4,N_lens,1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128,order='C')
+                   
+            # Lensing A_lens estimator
+            fields1 = {'u':U_maps[0],'v':V_maps[0]}
+            fields2 = {'u':U_maps[1],'v':V_maps[1]}
+            if verb: print("Computing Q-derivative for lensing")
+
+            # Iterate over L-bins
+            for ii in range(N_lens):
+                
+                # Filter to correct L-bin
+                Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+                LL_filt = (Ls>=self.L_edges_lens[ii])*(Ls<self.L_edges_lens[ii+1])
+                
+                def _compute_lensing_W(maps1,maps2,add_sym=False):
+                    tmp_lm = np.zeros(len(self.Lminfilt_lens),dtype=np.complex128)
+                    tmp_lm[self.Lminfilt_lens] = LL_filt*Ls*(Ls+1.)*self._compute_lensing_Phi(maps1,maps2,add_sym=add_sym)*self.C_phi[Ls]
+                    return self.base.to_map_spin(tmp_lm,-tmp_lm,spin=1,lmax=self.Lmax_lens)[0]
+                
+                # Compute all W maps
+                W_11 = _compute_lensing_W(fields1,fields1)
+                W_12sym = _compute_lensing_W(fields1,fields2,add_sym=True)
+                W_22 = _compute_lensing_W(fields2,fields2)
+                
+                def _get_Q(fields,W_maps):
+                    
+                    Qlm = np.zeros((1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128)
+                    ls = self.ls
+                    lpref0 = 0.5*np.sqrt(ls*(ls+1.))
+                    Cl_TTs = self.C_lens_weight['TT'][ls]
+                    if self.pol:
+                        lprefp1 = 0.25*np.sqrt((ls+2.)*(ls-1.))
+                        lprefm1 = 0.25*np.sqrt((ls-2.)*(ls+3.))
+                        Cl_TEs = self.C_lens_weight['TE'][ls]
+                        Cl_EEs = self.C_lens_weight['EE'][ls]
+                        Cl_BBs = self.C_lens_weight['BB'][ls]
+                        
+                    ## Compute first term
+                    # Spin-0
+                    input_map = np.real(fields['v'][0]*W_maps)
+                    Qlm[0] = -self.base.to_lm([input_map],lmax=self.lmax)[0][self.lminfilt]
+                    
+                    if self.pol:
+                        # Spin>0
+                        input_map = fields['v'][1]*W_maps-fields['v'][2]*W_maps.conjugate()
+                        lm_map_plus, lm_map_minus = self.base.to_lm_spin(input_map,input_map.conjugate(),spin=2,lmax=self.lmax)[:,self.lminfilt]
+                        Qlm[1] = -0.25*(lm_map_plus+lm_map_minus)
+                        Qlm[2] = 0.25j*(lm_map_plus-lm_map_minus)
+                               
+                    ## Compute second term
+                    # Z = T
+                    input_map = fields['u'][0]*W_maps
+                    tmp_lm_plus = np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conjugate(),spin=1,lmax=self.lmax),axis=0)[self.lminfilt]
+                    # add to X = T
+                    Qlm[0] += lpref0*Cl_TTs*tmp_lm_plus
+                    if self.pol:
+                        # also add to X = E
+                        Qlm[1] += lpref0*Cl_TEs*tmp_lm_plus
+                    # Z = E
+                    if self.pol:
+                        # lam=+1
+                        input_map = -fields['u'][1]*W_maps.conjugate()
+                        tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conjugate(),spin=1,lmax=self.lmax)[:,self.lminfilt]
+                        base = lprefp1*(tmp_lm_plus-tmp_lm_minus)
+                        Qlm[0] += Cl_TEs*base
+                        Qlm[1] += Cl_EEs*base
+                        Qlm[2] += lprefp1*(-1.0j)*Cl_BBs*(tmp_lm_plus+tmp_lm_minus)
+                        # lam=-1
+                        input_map = fields['u'][1]*W_maps
+                        tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conjugate(),spin=3,lmax=self.lmax)[:,self.lminfilt]
+                        base = lprefm1*(tmp_lm_plus-tmp_lm_minus)
+                        Qlm[0] += Cl_TEs*base
+                        Qlm[1] += Cl_EEs*base
+                        Qlm[2] += lprefm1*(-1.0j)*Cl_BBs*(tmp_lm_plus+tmp_lm_minus)    
+                    # Z = B
+                    if self.pol:
+                        # lam=+1
+                        input_map = -fields['u'][2]*W_maps.conjugate()
+                        tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conjugate(),spin=1,lmax=self.lmax)[:,self.lminfilt]
+                        base = lprefp1*1.0j*(tmp_lm_plus+tmp_lm_minus)
+                        Qlm[0] += Cl_TEs*base
+                        Qlm[1] += Cl_EEs*base
+                        Qlm[2] += lprefp1*Cl_BBs*(tmp_lm_plus-tmp_lm_minus)
+                        # lam=-1
+                        input_map = fields['u'][2]*W_maps
+                        tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conjugate(),spin=3,lmax=self.lmax)[:,self.lminfilt]
+                        base = lprefm1*1.0j*(tmp_lm_plus+tmp_lm_minus)
+                        Qlm[0] += Cl_TEs*base
+                        Qlm[1] += Cl_EEs*base
+                        Qlm[2] += lprefm1*Cl_BBs*(tmp_lm_plus-tmp_lm_minus)
+                    
+                    return Qlm/2. # halving to get correct symmetries later
+                
+                ### Assemble outputs
+                # 111
+                Qs[0,ii] += 12*_get_Q(fields1, W_11)
+                
+                # 222
+                Qs[1,ii] += 12*_get_Q(fields2, W_22)
+                
+                # 112
+                Qs[2,ii] += 4*_get_Q(fields1, W_12sym)
+                Qs[2,ii] += 4*_get_Q(fields2, W_11)
+    
+                # 122
+                Qs[3,ii] += 4*_get_Q(fields2, W_12sym)
+                Qs[3,ii] += 4*_get_Q(fields1, W_22)
+            
+            del fields1, fields2, W_11, W_22, W_12sym
+            
+            if weighting=='Ainv' and verb: print("Applying S^-1 weighting to output")
+            for qindex in range(4):
+                self._weight_Q_maps(Qs[qindex], weighting)
+            
+            return Qs.reshape(4,N_lens,-1)
 
         # Compute Q4 maps
         if verb: print("\n# Computing Q4 map for S^-1 weighting")

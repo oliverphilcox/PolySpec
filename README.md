@@ -12,17 +12,19 @@ PolySpec contains the following main modules:
 - `bspec_template`: Direct estimation of bispectrum template amplitudes
 - `tspec_template`: Direct estimation of trispectrum template amplitudes
 
-In the templates classes, we can estimate the following types of trispectra:
+In the templates classes, we include estimators for the following types of bispectra:
+- `fNL-loc`: Quadratic local templates
+- `fNL-eq`: Equilateral template, arising from inflaton self-interactions
+- `isw-lensing`: Lensing-ISW cross-correlations (i.e. the lensing bispectrum)
+- `neural`: General factorizable basis functions, parametrized by neural networks. The usage for this feature is described in the [separate-bk](https://github.com/KunhaoZhong/seperate_bk) repository.
+
+We additionally provide estimators for the following trispectrum templates:
 - `gNL-loc`, `tauNL-loc`: Cubic local templates
 - `gNL-con`: Featureless constant template
 - `gNL-dotdot`, `gNL-dotdel`, `gNL-deldel`: Effective Field Theory of Inflation templates
 - `tauNL-direc`, `tauNL-even`, `tauNL-odd`: Direction-dependent tauNL templates
 - `tauNL-heavy`, `tauNL-light`: Cosmological collider signatures from massive spinning particles
 - `lensing`, `isw-lensing`, `point-source`: CMB lensing, lensing-ISW cross-correlations, and point source amplitudes.
-
-We also include a few bispectrum estimators:
-- `fNL-loc`: Quadratic local templates
-- `isw-lensing`: Lensing-ISW cross-correlations (i.e. the lensing bispectrum).
 
 For details on the binned estimators, see the [Binned Tutorial](Tutorial-Binned.ipynb). For details on the template estimators see the [Template Tutorial](Tutorial-Template.ipynb).
 

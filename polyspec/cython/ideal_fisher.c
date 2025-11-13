@@ -41760,7 +41760,7 @@ __pyx_t_2 = __Pyx_MemoryView_Len(__pyx_t_3);
  *     cdef double[:,:,::1] zetaPQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
  *     cdef double[:,:,::1] zetaQQ_l = np.zeros((nl,nr,nr),dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
- *     cdef double pref = dpow(4.*M_PI,2.)*18./25.
+ *     cdef double pref = dpow(4.*M_PI,-1)*9./25.
  */
   __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_n_s_np); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 798, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
@@ -41813,7 +41813,7 @@ __pyx_t_2 = __Pyx_MemoryView_Len(__pyx_t_3);
  *     cdef double[:,:,::1] zetaPQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
  *     cdef double[:,:,::1] zetaQQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
  *     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)             # <<<<<<<<<<<<<<
- *     cdef double pref = dpow(4.*M_PI,2.)*18./25.
+ *     cdef double pref = dpow(4.*M_PI,-1)*9./25.
  * 
  */
   __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_n_s_np); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 799, __pyx_L1_error)
@@ -41861,11 +41861,11 @@ __pyx_t_2 = __Pyx_MemoryView_Len(__pyx_t_3);
   /* "ideal_fisher.pyx":800
  *     cdef double[:,:,::1] zetaQQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
  *     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
- *     cdef double pref = dpow(4.*M_PI,2.)*18./25.             # <<<<<<<<<<<<<<
+ *     cdef double pref = dpow(4.*M_PI,-1)*9./25.             # <<<<<<<<<<<<<<
  * 
  *     # Precompute r-dependent and l-dependent factors
  */
-  __pyx_v_pref = ((pow((4. * M_PI), 2.) * 18.) / 25.);
+  __pyx_v_pref = ((pow((4. * M_PI), -1.0) * 9.) / 25.);
 
   /* "ideal_fisher.pyx":803
  * 
@@ -43270,7 +43270,7 @@ __pyx_t_2 = __Pyx_MemoryView_Len(__pyx_t_3);
  *     cdef double[:,:,::1] zetaR1R2_l = np.zeros((nl,nr,nr),dtype=np.float64)
  *     cdef double[:,:,::1] zetaR2R2_l = np.zeros((nl,nr,nr),dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
- *     cdef double pref = dpow(4.*M_PI,2.)*54./25.
+ *     cdef double pref = dpow(4.*M_PI,-1.)*27./25.
  */
   __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_n_s_np); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 844, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
@@ -43323,7 +43323,7 @@ __pyx_t_2 = __Pyx_MemoryView_Len(__pyx_t_3);
  *     cdef double[:,:,::1] zetaR1R2_l = np.zeros((nl,nr,nr),dtype=np.float64)
  *     cdef double[:,:,::1] zetaR2R2_l = np.zeros((nl,nr,nr),dtype=np.float64)
  *     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)             # <<<<<<<<<<<<<<
- *     cdef double pref = dpow(4.*M_PI,2.)*54./25.
+ *     cdef double pref = dpow(4.*M_PI,-1.)*27./25.
  * 
  */
   __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_n_s_np); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 845, __pyx_L1_error)
@@ -43371,11 +43371,11 @@ __pyx_t_2 = __Pyx_MemoryView_Len(__pyx_t_3);
   /* "ideal_fisher.pyx":846
  *     cdef double[:,:,::1] zetaR2R2_l = np.zeros((nl,nr,nr),dtype=np.float64)
  *     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
- *     cdef double pref = dpow(4.*M_PI,2.)*54./25.             # <<<<<<<<<<<<<<
+ *     cdef double pref = dpow(4.*M_PI,-1.)*27./25.             # <<<<<<<<<<<<<<
  * 
  *     # Precompute r-dependent and l-dependent factors
  */
-  __pyx_v_pref = ((pow((4. * M_PI), 2.) * 54.) / 25.);
+  __pyx_v_pref = ((pow((4. * M_PI), -1.) * 27.) / 25.);
 
   /* "ideal_fisher.pyx":849
  * 
@@ -44793,7 +44793,7 @@ __pyx_t_2 = __Pyx_MemoryView_Len(__pyx_t_3);
  *     cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
  *     cdef double[:,:,::1] zetaAA_l, zetaAB_l, zetaBA_l, zetaBB_l
  *     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)             # <<<<<<<<<<<<<<
- *     cdef double pref = dpow(4.*M_PI,2.)*18./25.
+ *     cdef double pref = dpow(4.*M_PI,-1.)*9./25.
  * 
  */
   __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_n_s_np); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 893, __pyx_L1_error)
@@ -44841,11 +44841,11 @@ __pyx_t_2 = __Pyx_MemoryView_Len(__pyx_t_3);
   /* "ideal_fisher.pyx":894
  *     cdef double[:,:,::1] zetaAA_l, zetaAB_l, zetaBA_l, zetaBB_l
  *     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
- *     cdef double pref = dpow(4.*M_PI,2.)*18./25.             # <<<<<<<<<<<<<<
+ *     cdef double pref = dpow(4.*M_PI,-1.)*9./25.             # <<<<<<<<<<<<<<
  * 
  *     # Precompute r-dependent and l-dependent factors
  */
-  __pyx_v_pref = ((pow((4. * M_PI), 2.) * 18.) / 25.);
+  __pyx_v_pref = ((pow((4. * M_PI), -1.) * 9.) / 25.);
 
   /* "ideal_fisher.pyx":897
  * 
@@ -46077,7 +46077,7 @@ __pyx_t_2 = __Pyx_MemoryView_Len(__pyx_t_3);
  *     cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
  *     cdef double[:,:,::1] zetaAA_l, zetaAB_l, zetaAC_l, zetaBA_l, zetaBB_l, zetaBC_l, zetaCA_l, zetaCB_l, zetaCC_l
  *     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)             # <<<<<<<<<<<<<<
- *     cdef double pref = dpow(4.*M_PI,2.)*9./25.
+ *     cdef double pref = dpow(4.*M_PI,-1.)*9./50.
  * 
  */
   __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_n_s_np); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 938, __pyx_L1_error)
@@ -46125,11 +46125,11 @@ __pyx_t_2 = __Pyx_MemoryView_Len(__pyx_t_3);
   /* "ideal_fisher.pyx":939
  *     cdef double[:,:,::1] zetaAA_l, zetaAB_l, zetaAC_l, zetaBA_l, zetaBB_l, zetaBC_l, zetaCA_l, zetaCB_l, zetaCC_l
  *     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
- *     cdef double pref = dpow(4.*M_PI,2.)*9./25.             # <<<<<<<<<<<<<<
+ *     cdef double pref = dpow(4.*M_PI,-1.)*9./50.             # <<<<<<<<<<<<<<
  * 
  *     # Precompute r-dependent and l-dependent factors
  */
-  __pyx_v_pref = ((pow((4. * M_PI), 2.) * 9.) / 25.);
+  __pyx_v_pref = ((pow((4. * M_PI), -1.) * 9.) / 50.);
 
   /* "ideal_fisher.pyx":942
  * 

@@ -797,7 +797,7 @@ cpdef double[:,::1] fisher_deriv_fNL_loc(double[:,:,::1] plXs, double[:,:,::1] q
     cdef double[:,:,::1] zetaPQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
     cdef double[:,:,::1] zetaQQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
-    cdef double pref = dpow(4.*M_PI,2.)*18./25.
+    cdef double pref = dpow(4.*M_PI,-1)*9./25.
     
     # Precompute r-dependent and l-dependent factors
     for il in xrange(nl):
@@ -843,7 +843,7 @@ cpdef double[:,::1] fisher_deriv_fNL_eq(double[:,:,::1] plXs, double[:,:,::1] ql
     cdef double[:,:,::1] zetaR1R2_l = np.zeros((nl,nr,nr),dtype=np.float64)
     cdef double[:,:,::1] zetaR2R2_l = np.zeros((nl,nr,nr),dtype=np.float64)
     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
-    cdef double pref = dpow(4.*M_PI,2.)*54./25.
+    cdef double pref = dpow(4.*M_PI,-1.)*27./25.
     
     # Precompute r-dependent and l-dependent factors
     for il in xrange(nl):
@@ -891,7 +891,7 @@ cpdef double[:,::1] fisher_deriv_neural_cyclic(double[:,:,:,::1] alpha_lXs, doub
     cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
     cdef double[:,:,::1] zetaAA_l, zetaAB_l, zetaBA_l, zetaBB_l
     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
-    cdef double pref = dpow(4.*M_PI,2.)*18./25.
+    cdef double pref = dpow(4.*M_PI,-1.)*9./25.
     
     # Precompute r-dependent and l-dependent factors
     for il in xrange(nl):
@@ -936,7 +936,7 @@ cpdef double[:,::1] fisher_deriv_neural(double[:,:,:,::1] alpha_lXs, double[:,:,
     cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
     cdef double[:,:,::1] zetaAA_l, zetaAB_l, zetaAC_l, zetaBA_l, zetaBB_l, zetaBC_l, zetaCA_l, zetaCB_l, zetaCC_l
     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
-    cdef double pref = dpow(4.*M_PI,2.)*9./25.
+    cdef double pref = dpow(4.*M_PI,-1.)*9./50.
     
     # Precompute r-dependent and l-dependent factors
     for il in xrange(nl):

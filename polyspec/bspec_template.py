@@ -25,7 +25,7 @@ class BSpecTemplate():
     - C_Tphi, C_Ephi: cross spectrum of temperature/polarization and lensing  [C^Tphi_0, C^Tphi_1, etc.]. Required if 'isw-lensing' is in templates.
     - C_lens_weight: dictionary of lensed power spectra (TT, TE, etc.). Required if 'isw-lensing' is in templates.
     - r_star, r_hor: Comoving distance to last-scattering and the horizon (default: Planck 2018 values).
-    - neural_input: Input neural-network bispectrum templates. These must take the form (weights, alpha, beta, [gamma]), where alpha/beta/gamma are functions of k and i, for i = 1 ... length(weights).
+    - neural_input: Input neural-network bispectrum templates (only used if "neural" is in templates). These must take the form (weights, alpha, beta, [gamma]), where alpha/beta/gamma are functions of k and i, for i = 0 ... len(weights)-1.
     """
     def __init__(self, base, mask, applySinv, templates, lmin, lmax,  k_arr=[], Tl_arr=[], r_arr=[], ns=0.96, As=2.1e-9, k_pivot=0.05, r_values = [], r_weights = {}, C_Tphi=[], C_Ephi=[], C_lens_weight = {}, r_star=None, r_hor=None, neural_inputs=None):
         # Read in attributes
@@ -178,7 +178,13 @@ class BSpecTemplate():
             # Check inputs
             assert self.neural_inputs is not None, "Must supply neural network inputs!"
             assert len(self.neural_inputs) in [3, 4], "Neural network inputs must be of the form (weights, alpha, beta) or (weights, alpha, beta, gamma)"
-            self.neural_weights = np.asarray(self.neural_inputs[0],dtype=np.float64,order='C')
+            neural_weights = self.neural_inputs[0]
+            if len(neural_weights.shape)==2:
+                if neural_weights.shape[1]==1:
+                    neural_weights = neural_weights.ravel()
+                else:
+                    raise Exception("Unknown weight shape %s supplied!"%(neural_weights.shape))
+            self.neural_weights = np.asarray(neural_weights,dtype=np.float64,order='C')
             self.neural_terms = len(self.neural_weights)
             if len(self.neural_inputs) == 3:
                 self.neural_cyclic = True
@@ -210,7 +216,8 @@ class BSpecTemplate():
             self.to_compute.append(['u','v','v-isw'])
         
         # Identify unique components 
-        self.to_compute = np.unique(np.concatenate(self.to_compute))
+        if len(self.to_compute)>0:
+            self.to_compute = np.unique(np.concatenate(self.to_compute))
         
         # Create filtering for minimum ls
         self.lminfilt = self.base.l_arr[self.base.l_arr<=self.lmax]>=self.lmin
@@ -563,12 +570,12 @@ class BSpecTemplate():
         if self.neural_inputs is not None:
             output['neural-alpha'] = np.zeros((self.neural_terms, len(self.alpha_lXs[0,0,0]),self.base.Npix),order='C',dtype=np.float64)
             output['neural-beta'] = np.zeros((self.neural_terms, len(self.beta_lXs[0,0,0]),self.base.Npix),order='C',dtype=np.float64)
+            if not self.neural_cyclic:
+                output['neural-gamma'] = np.zeros((self.neural_terms,len(self.gamma_lXs[0,0,0]),self.base.Npix),order='C',dtype=np.float64)
             for i in range(self.neural_terms):
                 output['neural-alpha'][i] = self._compute_weighted_maps(input_map, self.alpha_lXs[i])
                 output['neural-beta'][i] = self._compute_weighted_maps(input_map, self.beta_lXs[i])
-            if not self.neural_cyclic:
-                output['neural-gamma'] = np.zeros((self.neural_terms, len(self.gamma_lXs[0,0,0]),self.base.Npix),order='C',dtype=np.float64)
-                for i in range(self.neural_terms):
+                if not self.neural_cyclic:
                     output['neural-gamma'][i] = self._compute_weighted_maps(input_map, self.gamma_lXs[i])
             
         return output
@@ -905,7 +912,7 @@ class BSpecTemplate():
 
     ### OPTIMIZATION
     @_timer_func('optimization')
-    def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_split=None, split_index=None, initial_r_points=None, verb=False):
+    def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_split=None, split_index=None, initial_r_points=None, verb=False, ideal_only=False):
         """
         Compute the 1D radial sampling points and weights via optimization (as in Smith & Zaldarriaga 06), up to some tolerance in the Fisher distance.
         Optimization will be done for each template, analytically computing the 'distance' between template approximations
@@ -921,6 +928,7 @@ class BSpecTemplate():
             - N_split (optional): Number of chunks to split the optimization into. If None, no splitting is performed.
             - split_index (optional): Index of the chunk to optimize. 
             - initial_r_points (optional): Starting set of radial points (used for the final optimization step).
+            - ideal_only (optional): Return the ideal Fisher matrix predictions without performing optimization.
         
         """
         assert self.ints_1d, "No 1D optimization is required for these templates!"
@@ -976,6 +984,11 @@ class BSpecTemplate():
         for t in ordered_templates:
             self.ideal_fisher[t] = derivs[t][0]
         
+        # Optionally exit and return ideal Fisher matrices
+        if ideal_only:
+            if verb: print("## Not performing optimization!")
+            return self.ideal_fisher
+            
         for template in ordered_templates:
             
             if verb: print("\nRunning optimization for template %s"%template)
