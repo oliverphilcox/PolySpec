@@ -16,7 +16,7 @@ In the templates classes, we include estimators for the following types of bispe
 - `fNL-loc`: Quadratic local templates
 - `fNL-eq`: Equilateral template, arising from inflaton self-interactions
 - `isw-lensing`: Lensing-ISW cross-correlations (i.e. the lensing bispectrum)
-- `neural`: General factorizable basis functions, parametrized by neural networks. The usage for this feature is described in the [separate-bk](https://github.com/KunhaoZhong/seperate_bk) repository.
+- `neural`: General factorizable basis functions, parametrized by neural networks. The usage for this feature is described in the [separable_bk](https://github.com/KunhaoZhong/separable_bk) repository.
 
 We additionally provide estimators for the following trispectrum templates:
 - `gNL-loc`, `tauNL-loc`: Cubic local templates
