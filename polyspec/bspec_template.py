@@ -1,4 +1,4 @@
-### Code for binned/template polyspectrum estimation on the full-sky. Author: Oliver Philcox (2022-2025)
+### Code for binned/template polyspectrum estimation on the full-sky. Author: Oliver Philcox (2022-2026)
 ## This module contains the bispectrum template estimation code
 
 import numpy as np
@@ -14,10 +14,10 @@ class BSpecTemplate():
     We also feed in a function that applies the S^-1 operator (which is ideally beam.mask.C_l^{tot,-1}, where C_l^tot includes the beam and noise). 
     
     Inputs:
-    - base: PolyBin class
+    - base: PolySpec class
     - mask: HEALPix mask applied to data. We can optionally specify a vector of three masks for [T, Q, U].
     - applySinv: function which returns S^-1 ~ P^dag Cov^{-1} in harmonic space, when applied to a given input map, where P = Mask * Beam.
-    - templates: types of templates to compute e.g. [fNL-loc, fNL-eq, isw-lensing, neural]
+    - templates: types of templates to compute e.g. [fNL-loc, fNL-eq, fNL-orth, fNL-orth2, neural-0, neural-2, binned, ..]
     - k_arr, Tl_arr: k-array, plus T- and (optionally) E-mode transfer functions for all ell. Required for all primordial templates.
     - lmin, lmax: minimum/maximum ell (inclusive)
     - ns, As, k_pivot: primordial power spectrum parameters
@@ -25,9 +25,11 @@ class BSpecTemplate():
     - C_Tphi, C_Ephi: cross spectrum of temperature/polarization and lensing  [C^Tphi_0, C^Tphi_1, etc.]. Required if 'isw-lensing' is in templates.
     - C_lens_weight: dictionary of lensed power spectra (TT, TE, etc.). Required if 'isw-lensing' is in templates.
     - r_star, r_hor: Comoving distance to last-scattering and the horizon (default: Planck 2018 values).
-    - neural_input: Input neural-network bispectrum templates (only used if "neural" is in templates). These must take the form (weights, alpha, beta, [gamma]), where alpha/beta/gamma are functions of k and i, for i = 0 ... len(weights)-1.
+    - neural_inputs: Input set of neural-network bispectrum templates (only used if "neural-0, neural-1, ..." is in templates). These must take the form ({weights_0, alpha_0, beta_0, [gamma_0]}, {weights_1, alpha_1, beta_1, [gamma_1]}, ...), where alpha/beta/gamma are functions of k and i, for i = 0 ... len(weights)-1. 
+    - k_bin_edges: List of Fourier-bin edges for the binned estimator: (k_1, k_2, k_3, ...). If specified, "binned" should be in templates.
+    - k_triplet_ids: List of {bin1, bin2, bin3, bin-id}. If specified, "binned" should be in templates.
     """
-    def __init__(self, base, mask, applySinv, templates, lmin, lmax,  k_arr=[], Tl_arr=[], r_arr=[], ns=0.96, As=2.1e-9, k_pivot=0.05, r_values = [], r_weights = {}, C_Tphi=[], C_Ephi=[], C_lens_weight = {}, r_star=None, r_hor=None, neural_inputs=None):
+    def __init__(self, base, mask, applySinv, templates, lmin, lmax,  k_arr=[], Tl_arr=[], r_arr=[], ns=0.96, As=2.1e-9, k_pivot=0.05, r_values = [], r_weights = {}, C_Tphi=[], C_Ephi=[], C_lens_weight = {}, r_star=None, r_hor=None, neural_inputs=None, k_bin_edges=None, k_triplet_ids=None):
         # Read in attributes
         self.base = base
         self.mask = mask
@@ -41,6 +43,8 @@ class BSpecTemplate():
         self.As = As
         self.k_pivot = k_pivot
         self.neural_inputs = neural_inputs
+        self.k_bin_edges = k_bin_edges
+        self.k_triplet_ids = k_triplet_ids
         
         # Create primordial power spectrum function
         print("Primordial Spectrum: n_s = %.2f, A_s = %.2e, k_pivot = %.2f"%(self.ns, self.As, self.k_pivot));
@@ -73,7 +77,7 @@ class BSpecTemplate():
         self._configure_templates(templates, C_Tphi, C_Ephi, C_lens_weight)
         
         # Check mask properties
-        if not type(mask)==float or type(mask)==int:
+        if not (type(mask)==float or type(mask)==int):
             if len(mask)==1 or len(mask)==3:
                 assert len(mask[0])==self.base.Npix, f'Mask has incorrect shape: {mask.shape}'
             else:
@@ -122,7 +126,7 @@ class BSpecTemplate():
             
             assert len(r_values)>0, "Must supply radial sampling points!"
             for t in templates:
-                if (t in self.all_templates_1d):
+                if (t in self.all_templates_1d) or ('neural' in t):
                     assert t in r_weights.keys(), "Must supply weight for template %s"%t
             self.r_arr = r_values
             self.N_r = len(self.r_arr)
@@ -139,12 +143,16 @@ class BSpecTemplate():
         """Check input templates and log which quantities to compute."""
         
         # Check correct templates are being used and print them
-        self.all_templates_1d = ['fNL-loc','fNL-eq','neural']
+        self.all_templates_1d = ['fNL-loc','fNL-eq','fNL-orth','fNL-orth2','binned']
         self.all_templates = self.all_templates_1d+['isw-lensing']
         ii = 0
+        neural_inds = []
         for t in templates:
             ii += 1
-            assert t in self.all_templates, "Unknown template %s supplied!"%t
+            if 'neural' in t:
+                neural_inds.append(int(t.split('-')[1]))
+            else:   
+                assert t in self.all_templates, "Unknown template %s supplied!"%t
         print("Templates: %s"%templates)
         
         def _merge_dict(d1,d2):
@@ -169,29 +177,89 @@ class BSpecTemplate():
         
         # Check which integrals to compute
         if 'fNL-loc' in templates:
-            self.to_compute.append(['p','q'])
+            self.to_compute.append(['f_m1','f_p2'])
             self.ints_1d = True
+        
         if 'fNL-eq' in templates:
-            self.to_compute.append(['p','q','r1','r2'])
+            self.to_compute.append(['f_m1','f_p0','f_p1','f_p2'])
             self.ints_1d = True
-        if 'neural' in templates:
+        
+        if 'fNL-orth' in templates:
+            self.to_compute.append(['f_m1','f_p0','f_p1','f_p2'])
+            self.ints_1d = True
+        
+        if 'fNL-orth2' in templates:
+            self.to_compute.append(['f_m2','f_m1','f_p0','f_p1','f_p2','f_p3','f_p4'])
+            self.ints_1d = True
+        
+        if 'binned' in templates:
             # Check inputs
-            assert self.neural_inputs is not None, "Must supply neural network inputs!"
-            assert len(self.neural_inputs) in [3, 4], "Neural network inputs must be of the form (weights, alpha, beta) or (weights, alpha, beta, gamma)"
-            neural_weights = self.neural_inputs[0]
-            if len(neural_weights.shape)==2:
-                if neural_weights.shape[1]==1:
-                    neural_weights = neural_weights.ravel()
+            assert self.k_bin_edges is not None, "Must specify k-bin-edges to use the binned estimator!"
+            assert self.k_triplet_ids is not None, "Must specify k-triplet-ids to use the binned estimator!"
+            assert self.k_bin_edges.min() >= self.k_arr.min(), "Must supply transfer function down to minimum bin edge"
+            assert self.k_bin_edges.max() <= self.k_arr.max(), "Must supply transfer function up to maximum bin edge"
+            assert len(self.k_triplet_ids.shape)==2, "k-triplet-ids must be a 2D array of {bin1, bin2, bin3, bin-id}"
+            assert (self.k_bin_edges == np.sort(self.k_bin_edges)).all(), "k-bin-edges must be ordered"
+            assert len(self.k_bin_edges) == len(np.unique(self.k_bin_edges)), "k-bin-edges must not contain duplicate values"
+            assert len(np.unique(self.k_triplet_ids[:,:3]))==len(self.k_bin_edges)-1, "k-triplet-ids must contain all bins in k-bin-edges"
+            assert (self.k_triplet_ids[:,0]<=self.k_triplet_ids[:,1]).all() and (self.k_triplet_ids[:,1]<=self.k_triplet_ids[:,2]).all(), "k-triplet-ids should be ordered"
+            self.k_triplet_ids = np.asarray(self.k_triplet_ids)
+            self.to_compute.append(['f_bin'])
+            self.ints_1d = True
+            self.nbin1d = len(self.k_bin_edges)-1
+            self.k_bin_means = np.sqrt(self.k_bin_edges[1:]*self.k_bin_edges[:-1])
+            
+            # Define the binning and degeneracy
+            self.nbin3d = len(self.k_triplet_ids)
+            self.bin_degeneracy = np.zeros(len(self.k_triplet_ids))
+            self.unique_bin_ids = np.unique(self.k_triplet_ids[:,3])
+            self.n_binned = len(self.unique_bin_ids)
+            for i in range(self.nbin3d):
+                ki, kj, kk = self.k_bin_means[self.k_triplet_ids[i,:3]]
+                ibin, jbin, kbin = self.k_triplet_ids[i,:3]
+
+                # Check triangle conditions
+                if not (ki>=np.abs(kj-kk)-1e-8 and ki<=kj+kk+1e-8):
+                    raise Exception("Configuration %d with indices (%d,%d,%d) doesn't satisfy the triangle condition!"%(i,ibin,jbin,kbin))
+                    
+                if ibin==jbin and jbin==kbin:
+                    self.bin_degeneracy[i] = 6
+                elif ibin==jbin:
+                    self.bin_degeneracy[i] = 2
+                elif jbin==kbin:
+                    self.bin_degeneracy[i] = 2
                 else:
-                    raise Exception("Unknown weight shape %s supplied!"%(neural_weights.shape))
-            self.neural_weights = np.asarray(neural_weights,dtype=np.float64,order='C')
-            self.neural_terms = len(self.neural_weights)
-            if len(self.neural_inputs) == 3:
-                self.neural_cyclic = True
-                print("Using a cyclic neural network input with %d terms"%self.neural_terms)
-            else:
-                self.neural_cyclic = False
-                print("Using a neural network input with %d terms"%self.neural_terms)
+                    self.bin_degeneracy[i] = 1
+            print("Using %d Fourier-space bins and %d unique shape bins"%(self.nbin3d,self.n_binned))
+        else:
+            self.n_binned = 0
+    
+        if np.any(['neural' in t for t in templates]):
+            # Check inputs
+            self.neural_inds = neural_inds
+            assert self.neural_inputs is not None, "Must supply neural network inputs!"
+            assert len(self.neural_inputs)==len(self.neural_inds), "Must supply one set of neural network inputs per template"
+            for i in range(len(self.neural_inds)):
+                n = self.neural_inds[i]
+                assert len(self.neural_inputs[i]) in [3, 4], "Neural-%d network inputs must be of the form (weights, alpha, beta) or (weights, alpha, beta, gamma)"%n
+            neural_weights = {self.neural_inds[i]: self.neural_inputs[i][0] for i in range(len(self.neural_inds))}
+            for n in self.neural_inds:
+                if len(neural_weights[n].shape)==2:
+                    if neural_weights[n].shape[1]==1:
+                        neural_weights[n] = neural_weights[n].ravel()
+                    else:
+                        raise Exception("Unknown neural-%d weight shape %s supplied!"%(n,neural_weights[n].shape))
+            self.neural_weights = {n: np.asarray(neural_weights[n],dtype=np.float64,order='C') for n in self.neural_inds}
+            self.neural_terms = {n: len(self.neural_weights[n]) for n in self.neural_inds}
+            self.neural_cyclic = {}
+            for i in range(len(self.neural_inds)):
+                n = self.neural_inds[i]
+                if len(self.neural_inputs[i]) == 3:
+                    self.neural_cyclic[n] = True
+                    print("Neural-%d: using a cyclic network input with %d terms"%(n,self.neural_terms[n]))
+                else:
+                    self.neural_cyclic[n] = False
+                    print("Neural-%d: Using an input with %d terms"%(n,self.neural_terms[n]))
             self.ints_1d = True
         if 'isw-lensing' in templates:
             # Check inputs
@@ -202,6 +270,7 @@ class BSpecTemplate():
                 assert len(C_Ephi)>=self.lmax+1, "Must specify C^E-phi(l) up to at least lmax."
             if not self.pol:
                 assert 'TT' in C_lens_weight.keys(), "Must specify lensed TT power spectrum!"
+                assert len(C_lens_weight['TT'])>=self.lmax+1, "Must specify C_lens_weight['TT'](l) up to at least lmax."
             else:
                 assert 'TE' in C_lens_weight.keys(), "Must specify lensed TE power spectrum!"
                 assert 'EE' in C_lens_weight.keys(), "Must specify lensed EE power spectrum!"
@@ -221,6 +290,12 @@ class BSpecTemplate():
         
         # Create filtering for minimum ls
         self.lminfilt = self.base.l_arr[self.base.l_arr<=self.lmax]>=self.lmin
+
+        # Define array sizes
+        if self.n_binned==0:
+            self.total_size = len(self.templates)
+        else:
+            self.total_size = len(self.templates)-1+self.n_binned
         
     def report_timings(self):
         """Report timings for various steps of the computation."""
@@ -284,7 +359,7 @@ class BSpecTemplate():
     def _prepare_templates(self, ints_1d=True):
         """Compute necessary k-integrals over the transfer functions for template estimation.
 
-        This fills arrays such as plXs and qlXs arrays. Note that values outside the desired ell & field range will be set to zero.
+        This fills arrays such as flXs_m1 and flXs_p2 arrays. Note that values outside the desired ell & field range will be set to zero.
         """
         # Print dimensions of k and r
         print("N_k: %d"%len(self.k_arr))
@@ -293,8 +368,14 @@ class BSpecTemplate():
         # Clear saved quantities, if necessary
         if hasattr(self, 't0_num'): delattr(self, 't0_num')
         if ints_1d:
-            if hasattr(self, 'plXs'): delattr(self, 'plXs')
-            if hasattr(self, 'qlXs'): delattr(self, 'qlXs')
+            if hasattr(self, 'flXs_m2'): delattr(self, 'flXs_m2')
+            if hasattr(self, 'flXs_m1'): delattr(self, 'flXs_m1')
+            if hasattr(self, 'flXs_p0'): delattr(self, 'flXs_p0')
+            if hasattr(self, 'flXs_p1'): delattr(self, 'flXs_p1')
+            if hasattr(self, 'flXs_p2'): delattr(self, 'flXs_p2')
+            if hasattr(self, 'flXs_p3'): delattr(self, 'flXs_p3')
+            if hasattr(self, 'flXs_p4'): delattr(self, 'flXs_p4')
+            if hasattr(self, 'flXs_bin'): delattr(self, 'flXs_bin')
             if hasattr(self, 'alpha_lXs'): delattr(self, 'alpha_lXs')
             if hasattr(self, 'beta_lXs'): delattr(self, 'beta_lXs')
             if hasattr(self, 'gamma_lXs'): delattr(self, 'gamma_lXs')
@@ -303,9 +384,7 @@ class BSpecTemplate():
         print("Precomputing Bessel functions")
         max_kr = max(self.k_arr)*max(self.r_arr)
         
-        x_arr = list(np.arange(0,self.lmax*2,0.01))+list(np.arange(self.lmax*2,min(max_kr*1.01,self.lmax*100),0.1))
-        if max_kr>100*self.lmax:
-            x_arr += list(np.linspace(self.lmax*100,max_kr*1.01,1000))
+        x_arr = list(np.arange(0,self.lmax*2,0.01))+list(np.arange(self.lmax*2,max_kr,0.1))
         x_arr = np.asarray(x_arr,dtype=np.float64)
         
         # Compute Bessel function in range of interest in Cython
@@ -320,51 +399,81 @@ class BSpecTemplate():
 
         # Set up arrays
         Pzeta_arr = self.Pzeta(self.k_arr)
+        
+        if 'f_m2' in self.to_compute and ints_1d:
+            
+            # Compute integrals in Cython
+            print("Computing f_l^X(r,-2) integrals")
+            self.flXs_m2 = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            p_integral_general(self.k_arr, Pzeta_arr, (2.+2.)/3., self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_m2)
+            
+        if 'f_m1' in self.to_compute and ints_1d:
+            
+            # Compute integrals in Cython
+            print("Computing f_l^X(r,-1) integrals")
+            self.flXs_m1 = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            p_integral(self.k_arr, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_m1)
+            
+        if 'f_p0' in self.to_compute and ints_1d:
+            
+            # Compute integrals in Cython
+            print("Computing f_l^X(r,0) integrals")
+            self.flXs_p0 = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            p_integral_general(self.k_arr, Pzeta_arr, (2.-0.)/3., self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_p0)
+        
+        if 'f_p1' in self.to_compute and ints_1d:
+            
+            # Compute integrals in Cython
+            print("Computing f_l^X(r,+1) integrals")
+            self.flXs_p1 = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            p_integral_general(self.k_arr, Pzeta_arr, (2.-1.)/3, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_p1)
+            
+        if 'f_p2' in self.to_compute and ints_1d:
+            
+            # Compute integrals in Cython
+            print("Computing f_l^X(r,+2) integrals")
+            self.flXs_p2 = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            q_integral(self.k_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_p2)
+            
+        if 'f_p3' in self.to_compute and ints_1d:
+            
+            # Compute integrals in Cython
+            print("Computing f_l^X(r,+3) integrals")
+            self.flXs_p3 = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            p_integral_general(self.k_arr, Pzeta_arr, (2.-3.)/3, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_p3)
+            
+        if 'f_p4' in self.to_compute and ints_1d:
+            
+            # Compute integrals in Cython
+            print("Computing f_l^X(r,+4) integrals")
+            self.flXs_p4 = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+            p_integral_general(self.k_arr, Pzeta_arr, (2.-4.)/3, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_p4)
 
-        if 'q' in self.to_compute and ints_1d:
+        if 'f_bin' in self.to_compute and ints_1d:
             
-            # Compute q integrals in Cython
-            print("Computing q_l^X(r) integrals")
-            self.qlXs = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
-            q_integral(self.k_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.qlXs)
-            
-        if 'p' in self.to_compute and ints_1d:
-            
-            # Compute p integrals in Cython
-            print("Computing p_l^X(r) integrals")
-            self.plXs = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
-            p_integral(self.k_arr, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.plXs)
-            
-        if 'r1' in self.to_compute and ints_1d:
-            
-            # Compute r integrals in Cython
-            print("Computing r1_l^X(r) integrals")
-            self.r1lXs = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
-            p_integral_general(self.k_arr, Pzeta_arr, 1./3., self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.r1lXs)
-            
-        if 'r2' in self.to_compute and ints_1d:
-            
-            # Compute r2 integrals in Cython
-            print("Computing r2_l^X(r) integrals")
-            self.r2lXs = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
-            p_integral_general(self.k_arr, Pzeta_arr, 2./3., self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.r2lXs)
+            # Compute integrals in Cython
+            print("Computing f_l^{X,a}(r) integrals")
+            self.flXs_bin = np.zeros((self.lmax+1,1+2*self.pol,self.N_r,self.nbin1d),dtype=np.float64,order='C')
+            p_integral_bin(self.k_arr, Pzeta_arr, np.asarray(self.k_bin_edges, dtype=np.float64, order='C'), self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_bin)
         
         if self.neural_inputs is not None:
             
             # Compute neural integrals in Cython
-            print("Computing f_l^X[alpha](r) integrals")
-            self.alpha_lXs = np.zeros((self.neural_terms,self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
-            self.beta_lXs  = np.zeros((self.neural_terms,self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
-            if not self.neural_cyclic:
-                self.gamma_lXs = np.zeros((self.neural_terms,self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
-            for i in range(self.neural_terms):
-                alphas = np.asarray(np.ravel([self.neural_inputs[1](np.float32(kk),i) for kk in self.k_arr]), dtype=np.float64)
-                betas = np.asarray(np.ravel([self.neural_inputs[2](np.float32(kk),i) for kk in self.k_arr]), dtype=np.float64)
-                f_integral(self.k_arr, alphas, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.alpha_lXs[i])
-                f_integral(self.k_arr, betas, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.beta_lXs[i])
-                if not self.neural_cyclic:
-                    gammas = np.asarray(np.ravel([self.neural_inputs[3](np.float32(kk),i) for kk in self.k_arr]), dtype=np.float64)
-                    f_integral(self.k_arr, gammas, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.gamma_lXs[i])
+            self.alpha_lXs, self.beta_lXs, self.gamma_lXs = {},{},{}
+            for j,n in enumerate(self.neural_inds):
+                self.alpha_lXs[n] = np.zeros((self.neural_terms[n],self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+                self.beta_lXs[n]  = np.zeros((self.neural_terms[n],self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+                if not self.neural_cyclic[n]:
+                    self.gamma_lXs[n] = np.zeros((self.neural_terms[n],self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
+                print("Computing f_l^X[alpha_%d,beta_%d,gamma_%d](r) integrals"%(n,n,n))
+                for i in range(self.neural_terms[n]):
+                    alphas = np.asarray(np.ravel([self.neural_inputs[j][1](np.float32(kk),i) for kk in self.k_arr]), dtype=np.float64)
+                    betas = np.asarray(np.ravel([self.neural_inputs[j][2](np.float32(kk),i) for kk in self.k_arr]), dtype=np.float64)
+                    f_integral(self.k_arr, alphas, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.alpha_lXs[n][i])
+                    f_integral(self.k_arr, betas, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.beta_lXs[n][i])
+                    if not self.neural_cyclic[n]:
+                        gammas = np.asarray(np.ravel([self.neural_inputs[j][3](np.float32(kk),i) for kk in self.k_arr]), dtype=np.float64)
+                        f_integral(self.k_arr, gammas, Pzeta_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.gamma_lXs[n][i])
             
         if ints_1d: del jlkr
         
@@ -378,20 +487,35 @@ class BSpecTemplate():
     @_timer_func('map_transforms')
     def _compute_weighted_maps(self, h_lm_filt, flX_arr, spin=0):
         """
-        Compute [Sum_lm {}_sY_lm(i) f_l^X(i) h_lm^X] maps for each sampling point i, given the relevant weightings. These are used in the bispectrum numerators and Fisher matrices.
+        Compute [Sum_lm {}_sY_lm(n) f_l^X(i) h_lm^X] maps for each sampling point i, given the relevant weightings. 
+        These are used in the bispectrum numerators and Fisher matrices.
+        """
+        if not (hasattr(self, 'r_arr') or hasattr(self, 'rtau_arr')):
+            raise Exception("Radial arrays have not been computed!")
+        
+        # Sum over polarizations (only filling non-zero elements)
+        # Note; we use Fortran-indexing for efficient memory access
+        summ = np.zeros((flX_arr.shape[2], len(self.lminfilt)), order='F', dtype=np.complex128)
+        summ[:, self.lminfilt] = self.utils.apply_fl_weights(flX_arr, h_lm_filt, 1.)
+        
+        # Compute SHTs
+        if spin != 0:
+            return self.base.to_map_vec(summ, output_spin=spin, lmax=self.lmax)[0]
+        else:
+            return self.base.to_map_vec(summ, output_spin=spin, lmax=self.lmax)
+        
+    @_timer_func('map_transforms')
+    def _compute_weighted_map_single(self, h_lm_filt, flX_arr, radial_index, spin=0):
+        """
+        Compute [Sum_lm {}_sY_lm(n) f_l^X(i) h_lm^X] maps for a single sampling point i, given the relevant weightings. These are used in the bispectrum numerators and Fisher matrices.
         """
         if not (hasattr(self,'r_arr') or hasattr(self,'rtau_arr')):
             raise Exception("Radial arrays have not been computed!")
         
         # Sum over polarizations (only filling non-zero elements)
-        summ = np.zeros((len(flX_arr[0,0]),len(self.lminfilt)),order='C',dtype=np.complex128)
-        summ[:,self.lminfilt] = self.utils.apply_fl_weights(flX_arr, h_lm_filt, 1.)
-        
-        # Compute SHTs 
-        if spin!=0:
-            return self.base.to_map_vec(summ, output_spin=spin, lmax=self.lmax)[0]
-        else:
-            return self.base.to_map_vec(summ, output_spin=spin, lmax=self.lmax)
+        summ = np.zeros((1,len(self.lminfilt)),order='C',dtype=np.complex128)
+        summ[0,self.lminfilt] = self.utils.apply_fl_weight_single(flX_arr, h_lm_filt, radial_index, 1.)
+        return self.base.to_map(summ, lmax=self.lmax)
 
     @_timer_func('map_transforms')
     def _compute_lensing_U_map(self, h_lm_filt):
@@ -501,20 +625,32 @@ class BSpecTemplate():
         # Return output
         return V
 
-    def _filter_pair(self, input_maps, filtering = 'Q'):
+    def _filter_pair(self, input_maps, filtering = 'F_m1', radial_index=None):
         """Compute the processed field with a given filtering for a pair of input maps."""
         
-        if filtering=='P':
-            return np.asarray([self._compute_weighted_maps(imap, self.plXs) for imap in input_maps],order='C')     
+        if   filtering=='F_m2':
+            return np.asarray([self._compute_weighted_map_single(imap, self.flXs_m2, radial_index) for imap in input_maps],order='C')     
         
-        elif filtering=='Q':
-            return np.asarray([self._compute_weighted_maps(imap, self.qlXs) for imap in input_maps],order='C')     
+        elif filtering=='F_m1':
+            return np.asarray([self._compute_weighted_map_single(imap, self.flXs_m1, radial_index) for imap in input_maps],order='C')     
         
-        elif filtering=='R1':
-            return np.asarray([self._compute_weighted_maps(imap, self.r1lXs) for imap in input_maps],order='C')     
+        elif filtering=='F_p0':
+            return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p0, radial_index) for imap in input_maps],order='C')     
         
-        elif filtering=='R2':
-            return np.asarray([self._compute_weighted_maps(imap, self.r2lXs) for imap in input_maps],order='C')     
+        elif filtering=='F_p1':
+            return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p1, radial_index) for imap in input_maps],order='C')     
+        
+        elif filtering=='F_p2':
+            return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p2, radial_index) for imap in input_maps],order='C')     
+        
+        elif filtering=='F_p3':
+            return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p3, radial_index) for imap in input_maps],order='C')     
+
+        elif filtering=='F_p4':
+            return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p4, radial_index) for imap in input_maps],order='C')     
+
+        elif filtering=='F_bin':
+            return np.asarray([self._compute_weighted_maps(imap, np.asarray(self.flXs_bin[:,:,radial_index,:], order='C')) for imap in input_maps],order='C')
         
         elif filtering=='U':
             return np.asarray([self._compute_lensing_U_map(imap) for imap in input_maps], order='C')        
@@ -525,18 +661,21 @@ class BSpecTemplate():
         elif filtering=='V-ISW':
             return np.asarray([self._compute_isw_V_map(imap) for imap in input_maps], order='C')        
         
-        elif filtering=='neural-alpha':
-            return np.asarray([[self._compute_weighted_maps(imap, self.alpha_lXs[i]) for imap in input_maps] for i in range(self.neural_terms)], order='C')
+        elif 'neural-alpha' in filtering:
+            n = int(filtering.split('-')[2])
+            return np.asarray([[self._compute_weighted_map_single(imap, self.alpha_lXs[n][i], radial_index) for imap in input_maps] for i in range(self.neural_terms[n])], order='C')
         
-        elif filtering=='neural-beta':
-            return np.asarray([[self._compute_weighted_maps(imap, self.beta_lXs[i]) for imap in input_maps] for i in range(self.neural_terms)], order='C')
+        elif 'neural-beta' in filtering:
+            n = int(filtering.split('-')[2])
+            return np.asarray([[self._compute_weighted_map_single(imap, self.beta_lXs[n][i], radial_index) for imap in input_maps] for i in range(self.neural_terms[n])], order='C')
 
-        elif filtering=='neural-gamma':
-            return np.asarray([[self._compute_weighted_maps(imap, self.gamma_lXs[i]) for imap in input_maps] for i in range(self.neural_terms)], order='C')
+        elif 'neural-gamma' in filtering:
+            n = int(filtering.split('-')[2])
+            return np.asarray([[self._compute_weighted_map_single(imap, self.gamma_lXs[n][i], radial_index) for imap in input_maps] for i in range(self.neural_terms[n])], order='C')
 
         else:
             raise Exception("Filtering %s is not implemented!"%filtering)
-
+    
     def _apply_all_filters(self, input_map):
         """Compute the processed fields with all relevant filterings for a single input map."""
         
@@ -544,19 +683,36 @@ class BSpecTemplate():
         output = {}
         
         # Compute local maps
-        if 'p' in self.to_compute:
-            output['p'] = self._compute_weighted_maps(input_map, self.plXs)
+        if 'f_m1' in self.to_compute:
+            output['f_m1'] = self._compute_weighted_maps(input_map, self.flXs_m1)
               
-        if 'q' in self.to_compute:
-            output['q'] = self._compute_weighted_maps(input_map, self.qlXs)
+        if 'f_p2' in self.to_compute:
+            output['f_p2'] = self._compute_weighted_maps(input_map, self.flXs_p2)
         
         # Compute equilateral maps
-        if 'r1' in self.to_compute:
-            output['r1'] = self._compute_weighted_maps(input_map, self.r1lXs)
+        if 'f_p1' in self.to_compute:
+            output['f_p1'] = self._compute_weighted_maps(input_map, self.flXs_p1)
             
-        if 'r2' in self.to_compute:
-            output['r2'] = self._compute_weighted_maps(input_map, self.r2lXs) 
-              
+        if 'f_p0' in self.to_compute:
+            output['f_p0'] = self._compute_weighted_maps(input_map, self.flXs_p0) 
+
+        # Compute other maps
+        if 'f_m2' in self.to_compute:
+            output['f_m2'] = self._compute_weighted_maps(input_map, self.flXs_m2)
+
+        if 'f_p3' in self.to_compute:
+            output['f_p3'] = self._compute_weighted_maps(input_map, self.flXs_p3)
+
+        if 'f_p4' in self.to_compute:
+            output['f_p4'] = self._compute_weighted_maps(input_map, self.flXs_p4)
+
+        # Compute binned maps
+        if 'f_bin' in self.to_compute:
+            # Flatten all bins to one dimension
+            flXs_flat = self.flXs_bin.transpose(0, 1, 3, 2).reshape(self.flXs_bin.shape[0], self.flXs_bin.shape[1], -1)
+            # Assemble output and reshape
+            output['f_bin'] = self._compute_weighted_maps(input_map, flXs_flat).reshape(self.nbin1d, self.N_r, self.base.Npix)
+             
         # Compute lensing maps
         if 'u' in self.to_compute:
             output['u'] = self._compute_lensing_U_map(input_map)        
@@ -568,15 +724,16 @@ class BSpecTemplate():
             output['v-isw'] = self._compute_isw_V_map(input_map)
             
         if self.neural_inputs is not None:
-            output['neural-alpha'] = np.zeros((self.neural_terms, len(self.alpha_lXs[0,0,0]),self.base.Npix),order='C',dtype=np.float64)
-            output['neural-beta'] = np.zeros((self.neural_terms, len(self.beta_lXs[0,0,0]),self.base.Npix),order='C',dtype=np.float64)
-            if not self.neural_cyclic:
-                output['neural-gamma'] = np.zeros((self.neural_terms,len(self.gamma_lXs[0,0,0]),self.base.Npix),order='C',dtype=np.float64)
-            for i in range(self.neural_terms):
-                output['neural-alpha'][i] = self._compute_weighted_maps(input_map, self.alpha_lXs[i])
-                output['neural-beta'][i] = self._compute_weighted_maps(input_map, self.beta_lXs[i])
-                if not self.neural_cyclic:
-                    output['neural-gamma'][i] = self._compute_weighted_maps(input_map, self.gamma_lXs[i])
+            for n in self.neural_inds:
+                output['neural-alpha-%d'%n] = np.zeros((self.neural_terms[n], len(self.alpha_lXs[n][0,0,0]),self.base.Npix),order='C',dtype=np.float64)
+                output['neural-beta-%d'%n] = np.zeros((self.neural_terms[n], len(self.beta_lXs[n][0,0,0]),self.base.Npix),order='C',dtype=np.float64)
+                if not self.neural_cyclic[n]:
+                    output['neural-gamma-%d'%n] = np.zeros((self.neural_terms[n],len(self.gamma_lXs[n][0,0,0]),self.base.Npix),order='C',dtype=np.float64)
+                for i in range(self.neural_terms[n]):
+                    output['neural-alpha-%d'%n][i] = self._compute_weighted_maps(input_map, self.alpha_lXs[n][i])
+                    output['neural-beta-%d'%n][i] = self._compute_weighted_maps(input_map, self.beta_lXs[n][i])
+                    if not self.neural_cyclic[n]:
+                        output['neural-gamma-%d'%n][i] = self._compute_weighted_maps(input_map, self.gamma_lXs[n][i])
             
         return output
     
@@ -588,9 +745,13 @@ class BSpecTemplate():
         We return a set of weighted maps for this simulation (filtered by e.g. p_l^X).
         """
         # Transform to Fourier space and normalize appropriately
-        t_init = time.time()
-        h_sim_lm = np.asarray(self.applySinv(sim, input_type=input_type, lmax=self.lmax)[:,self.lminfilt],order='C')
-        self.timers['Sinv'] += time.time()-t_init
+        if input_type=='Sinv_map':
+            assert sim.shape[1]==self.lminfilt.sum(), "S^-1.sim has the wrong shape!"
+            h_sim_lm = sim.copy()
+        else:
+            t_init = time.time()
+            h_sim_lm = np.asarray(self.applySinv(sim, input_type=input_type, lmax=self.lmax)[:,self.lminfilt],order='C')
+            self.timers['Sinv'] += time.time()-t_init
         
         # Compute processed maps
         proc_maps = self._apply_all_filters(h_sim_lm)
@@ -629,7 +790,7 @@ class BSpecTemplate():
         else:
             self.preload = False
             if verb: print("No preloading; simulations will be loaded and accessed at runtime.")
-
+            
             # Simply save iterator and continue (simulations will be processed in serial later) 
             self.load_sim_data = lambda ii: self._process_sim(load_sim(ii), input_type=input_type)
             
@@ -692,7 +853,7 @@ class BSpecTemplate():
     def _weight_Q_maps(self, tmp_Q, weighting='Ainv'):
         """Apply inplace weighting to a Q map to form output array. This includes factors of S^-1.P if necessary."""
         
-        for index in range(len(self.templates)):
+        for index in range(self.total_size):
             if weighting=='Ainv':
                 # Construct l-space map down to l=0
                 full_Q = np.zeros((1+2*self.pol,len(self.lminfilt)),dtype=np.complex128)
@@ -708,21 +869,20 @@ class BSpecTemplate():
                 tmp_Q[index] = self.m_weight*tmp_Q[index]   
 
     @_timer_func('fish_deriv')
-    def _transform_maps(self, map12, flXs, weights, spin=0):
+    def _transform_maps(self, map12, flXs, weights, spin=0, lm_map=None):
         """Compute Sum_i w_i M_LM f^X_L(i) for real-space map M(n). We optionally average over spins."""
-        output = np.zeros((1+2*self.pol,np.sum(self.lfilt)),dtype='complex')
         if spin==0:
-            lm_map = np.asarray(self.base.to_lm_vec(map12,lmax=self.lmax)[:,self.lminfilt],order='C')
+            if lm_map is None:
+                lm_map = np.asarray(self.base.to_lm_vec(map12,lmax=self.lmax)[:,self.lminfilt],order='C')
             return self.utils.radial_sum(lm_map, weights, flXs)
-            # return np.sum(self.base.to_lm_vec(map12,lmax=self.lmax).T[self.lminfilt,None,:]*flXs*weights,axis=2).T
         elif spin==1:
-            lm_map = np.asarray(self.base.to_lm_vec([map12,map12.conjugate()],spin=1,lmax=self.lmax)[:,:,self.lminfilt],order='C')
+            if lm_map is None:
+                lm_map = np.asarray(self.base.to_lm_vec([map12,map12.conjugate()],spin=1,lmax=self.lmax)[:,:,self.lminfilt],order='C')
             return self.utils.radial_sum_spin1(lm_map, weights, flXs)
-            # return 0.5*np.sum((np.array([1,-1])[:,None,None]*self.base.to_lm_vec([map123,map123.conjugate()],spin=1,lmax=self.lmax)).sum(axis=0).T[self.lminfilt,None,:]*flXs*weights,axis=2).T
         else:
             raise Exception(f"Wrong spin s = {spin}!")
 
-    def _compute_fisher_derivatives(self, templates, N_fish_optim=None, verb=False):
+    def _compute_fisher_derivatives(self, templates, verb=False, input_derivatives={}):
         """Compute the derivative of the ideal Fisher matrix with respect to the weights for each template of interest."""
 
         # Output array
@@ -736,24 +896,48 @@ class BSpecTemplate():
             
         t_init = time.time()
         for template in templates:
-                
+
+            # Load from input dictionary if possible
+            if template in input_derivatives.keys():
+                if verb: print("\tLoading derivative %s from input dictionary!"%template)
+                output[template] = input_derivatives[template]
+                continue
+
+            # Compute derivative matrices from scratch
             if template=='fNL-loc':
                 if verb: print("\tComputing fNL-loc Fisher matrix derivative exactly")
-                deriv_matrix = np.asarray(fisher_deriv_fNL_loc(self.plXs, self.qlXs, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                deriv_matrix = np.asarray(fisher_deriv_fNL_loc(self.flXs_m1, self.flXs_p2, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
                                     legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
                
             elif template=='fNL-eq':
                 if verb: print("\tComputing fNL-eq Fisher matrix derivative exactly")
-                deriv_matrix = np.asarray(fisher_deriv_fNL_eq(self.plXs, self.qlXs, self.r1lXs, self.r2lXs, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                deriv_matrix = np.asarray(fisher_deriv_fNL_eq(self.flXs_m1, self.flXs_p2, self.flXs_p1, self.flXs_p0, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
                                     legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
-                
-            elif template=='neural':
-                if verb: print("\tComputing neural Fisher matrix derivative exactly")
-                if not self.neural_cyclic:
-                    deriv_matrix = np.asarray(fisher_deriv_neural(self.alpha_lXs, self.beta_lXs, self.gamma_lXs, self.neural_weights, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+            
+            elif template=='fNL-orth':
+                if verb: print("\tComputing fNL-orth Fisher matrix derivative exactly")
+                deriv_matrix = np.asarray(fisher_deriv_fNL_orth(self.flXs_m1, self.flXs_p2, self.flXs_p1, self.flXs_p0, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                                    legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+
+            elif template=='fNL-orth2':
+                if verb: print("\tComputing fNL-orth2 Fisher matrix derivative exactly")
+                deriv_matrix = np.asarray(fisher_deriv_fNL_orth2(np.asarray([self.flXs_m2, self.flXs_m1, self.flXs_p0, self.flXs_p1, self.flXs_p2, self.flXs_p3, self.flXs_p4], order='C',dtype=np.float64), self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                                    legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+
+            elif template=='binned':
+                if verb: print("\tComputing binned Fisher matrix derivative exactly")
+                flXs_bin_sum = np.asarray(self.flXs_bin.sum(axis=3), order='C', dtype=np.float64)
+                deriv_matrix = np.asarray(fisher_deriv_fNL_binned(flXs_bin_sum, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                                    legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+            
+            elif 'neural' in template:
+                n = int(template.split('-')[1])
+                if verb: print("\tComputing neural-%d Fisher matrix derivative exactly"%n)
+                if not self.neural_cyclic[n]:
+                    deriv_matrix = np.asarray(fisher_deriv_neural(self.alpha_lXs[n], self.beta_lXs[n], self.gamma_lXs[n], self.neural_weights[n], self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
                                         legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
                 else:
-                    deriv_matrix = np.asarray(fisher_deriv_neural_cyclic(self.alpha_lXs, self.beta_lXs, self.neural_weights, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                    deriv_matrix = np.asarray(fisher_deriv_neural_cyclic(self.alpha_lXs[n], self.beta_lXs[n], self.neural_weights[n], self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
                                         legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
                 
             else:
@@ -764,10 +948,10 @@ class BSpecTemplate():
         self.timers['analytic_fisher'] += time.time()-t_init
 
         return output
-
+    
     ### NUMERATOR
     @_timer_func('numerator')
-    def Bl_numerator(self, data, include_linear_term=True, verb=False, input_type='map'):
+    def Bl_numerator(self, data, include_linear_term=True, verb=False, input_type='map', return_cubic=False):
         """
         Compute the numerator of the quasi-optimal bispectrum estimator for all templates.
 
@@ -789,49 +973,87 @@ class BSpecTemplate():
                 assert (len(data)==1 and len(data[0])==self.base.Npix) or len(data)==self.base.Npix, "Data must contain T only!"
 
         # Apply S^-1 to data and transform to harmonic space
-        t_init = time.time()
-        h_data_lm = np.asarray(self.applySinv(data, input_type=input_type, lmax=self.lmax)[:,self.lminfilt], order='C')
-        self.timers['Sinv'] += time.time()-t_init
+        if input_type == 'Sinv_map':
+            assert data.shape[1]==self.lminfilt.sum(), "S^-1.data has the wrong shape!"
+            h_data_lm = data.copy()
+        else:
+            t_init = time.time()
+            h_data_lm = np.asarray(self.applySinv(data, input_type=input_type, lmax=self.lmax)[:,self.lminfilt], order='C')
+            self.timers['Sinv'] += time.time()-t_init
            
         # Compute all relevant weighted maps
         proc_maps = self._apply_all_filters(h_data_lm)
         
         # Define 3- and 1-field arrays
-        b3_num = np.zeros(len(self.templates))
+        b3_num = np.zeros(self.total_size)
         if include_linear_term:
-            b1_num = np.zeros(len(self.templates))
+            b1_num = np.zeros(self.total_size)
             
         if verb: print("# Assembling bispectrum numerator (3-field term)")
-        for ii,t in enumerate(self.templates):
+        index = 0
+        for t in self.templates:
             
             if t=='fNL-loc':
                 # fNL-local template
                 print("Computing fNL-local template")
                 
                 t_init = time.time()
-                b3_num[ii] = 3./5.*self.utils.fnl_sum(self.r_weights[t], proc_maps['p'], proc_maps['p'], proc_maps['q'])*self.base.A_pix
+                b3_num[index] = 3./5.*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m1'], proc_maps['f_m1'], proc_maps['f_p2'])*self.base.A_pix
+                index += 1
                 self.timers['fNL_summation'] += time.time()-t_init
-
+                
             elif t=='fNL-eq':
                 # fNL-eq template
                 print("Computing fNL-eq template")
                 
                 t_init = time.time()
-                summ  = 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['r1'], proc_maps['r2'], proc_maps['p'])
-                summ -= 3*self.utils.fnl_sum(self.r_weights[t], proc_maps['p'], proc_maps['p'], proc_maps['q'])
-                summ -= 2*self.utils.fnl_sum(self.r_weights[t], proc_maps['r2'], proc_maps['r2'], proc_maps['r2'])
-                b3_num[ii] = 3./5.*summ*self.base.A_pix
+                summ  = 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p1'], proc_maps['f_p0'], proc_maps['f_m1'])
+                summ -= 3*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m1'], proc_maps['f_m1'], proc_maps['f_p2'])
+                summ -= 2*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p0'], proc_maps['f_p0'], proc_maps['f_p0'])
+                b3_num[index] = 3./5.*summ*self.base.A_pix
+                index += 1
                 self.timers['fNL_summation'] += time.time()-t_init
 
-            elif t=='neural':
-                # Neural-network input template
-                print("Computing neural template")
+            elif t=='fNL-orth':
+                # fNL-eq template
+                print("Computing fNL-orth template")
                 
                 t_init = time.time()
-                if not self.neural_cyclic:
-                    b3_num[ii] = 3./5.*self.utils.neural_sum(self.r_weights[t], self.neural_weights, proc_maps['neural-alpha'], proc_maps['neural-beta'], proc_maps['neural-gamma'])*self.base.A_pix 
+                summ  = 18*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p1'], proc_maps['f_p0'], proc_maps['f_m1'])
+                summ -= 9*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m1'], proc_maps['f_m1'], proc_maps['f_p2'])
+                summ -= 8*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p0'], proc_maps['f_p0'], proc_maps['f_p0'])
+                b3_num[index] = 3./5.*summ*self.base.A_pix
+                index += 1
+                self.timers['fNL_summation'] += time.time()-t_init
+
+            elif t=='fNL-orth2':
+                # fNL-eq template
+                print("Computing fNL-orth2 template")
+
+                t_init = time.time()
+                p = 27./(743./(7.*(20*np.pi**2.-193.))-21.)
+                summ = -(2+20./9.*p)*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p0'], proc_maps['f_p0'], proc_maps['f_p0'])
+                summ += (6+10./3.*p)*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m1'], proc_maps['f_p0'], proc_maps['f_p1'])
+                summ -= 20./9.*p*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m2'], proc_maps['f_p1'], proc_maps['f_p1'])
+                summ -= (3+p)*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m1'], proc_maps['f_m1'], proc_maps['f_p2'])
+                summ += 10./3.*p*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m2'], proc_maps['f_p0'], proc_maps['f_p2'])
+                summ -= 4./3.*p*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m2'], proc_maps['f_m1'], proc_maps['f_p3'])
+                summ += 1./9.*p*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m2'], proc_maps['f_m2'], proc_maps['f_p4'])
+                b3_num[index] = 3./5.*summ*self.base.A_pix
+                index += 1
+                self.timers['fNL_summation'] += time.time()-t_init
+
+            elif 'neural' in t:
+                # Neural-network input template
+                n = int(t.split('-')[1])
+                print("Computing neural-%d template"%n)
+                
+                t_init = time.time()
+                if not self.neural_cyclic[n]:
+                    b3_num[index] = 3./5.*self.utils.neural_sum(self.r_weights[t], self.neural_weights[n], proc_maps['neural-alpha-%d'%n], proc_maps['neural-beta-%d'%n], proc_maps['neural-gamma-%d'%n])*self.base.A_pix 
                 else: 
-                    b3_num[ii] = 3./5.*self.utils.neural_sum(self.r_weights[t], self.neural_weights, proc_maps['neural-alpha'], proc_maps['neural-beta'], proc_maps['neural-beta'])*self.base.A_pix
+                    b3_num[index] = 3./5.*self.utils.neural_sum(self.r_weights[t], self.neural_weights[n], proc_maps['neural-alpha-%d'%n], proc_maps['neural-beta-%d'%n], proc_maps['neural-beta-%d'%n])*self.base.A_pix
+                index += 1
                 self.timers['fNL_summation'] += time.time()-t_init
                 
             elif t=='isw-lensing':
@@ -839,9 +1061,19 @@ class BSpecTemplate():
                 print("Computing ISW-lensing template")
                 
                 t_init = time.time()
-                b3_num[ii] = 0.5*isw_bispectrum_sum(proc_maps['u'], proc_maps['v'], proc_maps['v-isw'], self.base.nthreads)*self.base.A_pix
+                b3_num[index] = 0.5*isw_bispectrum_sum(proc_maps['u'], proc_maps['v'], proc_maps['v-isw'], self.base.nthreads)*self.base.A_pix
+                index += 1
                 self.timers['lensing_summation'] += time.time()-t_init
+
+            elif t=='binned':
                 
+                # Binned bispectra
+                print("Computing binned template")
+                t_init = time.time()
+                self.utils.assemble_b3_binned(self.unique_bin_ids.astype(np.int32), self.k_triplet_ids.astype(np.int32), self.bin_degeneracy.astype(np.int32), b3_num, index, self.base.A_pix, self.r_weights[t], proc_maps['f_bin'])
+                index += len(self.unique_bin_ids)
+                self.timers['fNL_summation'] += time.time()-t_init
+
         if include_linear_term:
 
             # Iterate over simulations
@@ -855,64 +1087,135 @@ class BSpecTemplate():
                     this_proc_maps = self.load_sim_data(isim)
 
                 # Compute templates
-                for ii,t in enumerate(self.templates):
+                index = 0
+                for t in self.templates:
                     if t=='fNL-loc':
                         t_init = time.time()
                         
                         # Sum over permutations
-                        summ  = 2.*self.utils.fnl_sum(self.r_weights[t], proc_maps['p'], this_proc_maps['p'], this_proc_maps['q'])
-                        summ += self.utils.fnl_sum(self.r_weights[t], this_proc_maps['p'], this_proc_maps['p'], proc_maps['q'])
-                        b1_num[ii] += -3./5.*summ*self.base.A_pix/self.N_it
+                        summ  = 2.*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m1'], this_proc_maps['f_m1'], this_proc_maps['f_p2'])
+                        summ += self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m1'], this_proc_maps['f_m1'], proc_maps['f_p2'])
+                        b1_num[index] += -3./5.*summ*self.base.A_pix/self.N_it
+                        index += 1
                         self.timers['fNL_summation'] += time.time()-t_init
                         
-                    if t=='fNL-eq':
+                    elif t=='fNL-eq':
+                        t_init = time.time()
+
+                        # Sum over permutations
+                        summ  = 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p1'], this_proc_maps['f_p0'], this_proc_maps['f_m1'])
+                        summ += 6*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_p1'], proc_maps['f_p0'], this_proc_maps['f_m1'])
+                        summ += 6*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_p1'], this_proc_maps['f_p0'], proc_maps['f_m1'])
+                        summ -= 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m1'], this_proc_maps['f_m1'], this_proc_maps['f_p2'])
+                        summ -= 3*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m1'], this_proc_maps['f_m1'], proc_maps['f_p2'])
+                        summ -= 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p0'], this_proc_maps['f_p0'], this_proc_maps['f_p0'])
+                        b1_num[index] += -3./5.*summ*self.base.A_pix/self.N_it
+                        index += 1
+                        self.timers['fNL_summation'] += time.time()-t_init
+
+                    elif t=='fNL-orth':
                         t_init = time.time()
                         
                         # Sum over permutations
-                        summ  = 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['r1'], this_proc_maps['r2'], this_proc_maps['p'])
-                        summ += 6*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['r1'], proc_maps['r2'], this_proc_maps['p'])
-                        summ += 6*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['r1'], this_proc_maps['r2'], proc_maps['p'])
-                        summ -= 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['p'], this_proc_maps['p'], this_proc_maps['q'])
-                        summ -= 3*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['p'], this_proc_maps['p'], proc_maps['q'])
-                        summ -= 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['r2'], this_proc_maps['r2'], this_proc_maps['r2'])
-                        b1_num[ii] += -3./5.*summ*self.base.A_pix/self.N_it
+                        summ  = 18*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p1'], this_proc_maps['f_p0'], this_proc_maps['f_m1'])
+                        summ += 18*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_p1'], proc_maps['f_p0'], this_proc_maps['f_m1'])
+                        summ += 18*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_p1'], this_proc_maps['f_p0'], proc_maps['f_m1'])
+                        summ -= 18*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m1'], this_proc_maps['f_m1'], this_proc_maps['f_p2'])
+                        summ -= 9*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m1'], this_proc_maps['f_m1'], proc_maps['f_p2'])
+                        summ -= 24*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p0'], this_proc_maps['f_p0'], this_proc_maps['f_p0'])
+                        b1_num[index] += -3./5.*summ*self.base.A_pix/self.N_it
+                        index += 1
+                        self.timers['fNL_summation'] += time.time()-t_init
+
+                    elif t=='fNL-orth2':
+                        t_init = time.time()
+
+                        # Sum over permutations
+                        summ  = 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p1'], this_proc_maps['f_p0'], this_proc_maps['f_m1'])
+                        summ += 6*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_p1'], proc_maps['f_p0'], this_proc_maps['f_m1'])
+                        summ += 6*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_p1'], this_proc_maps['f_p0'], proc_maps['f_m1'])
+                        summ -= 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m1'], this_proc_maps['f_m1'], this_proc_maps['f_p2'])
+                        summ -= 3*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m1'], this_proc_maps['f_m1'], proc_maps['f_p2'])
+                        summ -= 6*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p0'], this_proc_maps['f_p0'], this_proc_maps['f_p0'])
+                        
+                        # Sum over permutations
+                        p = 27./(743./(7.*(20*np.pi**2.-193.))-21.)
+                        summ  = -3.*(2+20./9.*p)*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_p0'], this_proc_maps['f_p0'], this_proc_maps['f_p0'])
+                        
+                        summ += (6+10./3.*p)*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m1'], this_proc_maps['f_p0'], this_proc_maps['f_p1'])
+                        summ += (6+10./3.*p)*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m1'], proc_maps['f_p0'], this_proc_maps['f_p1'])
+                        summ += (6+10./3.*p)*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m1'], this_proc_maps['f_p0'], proc_maps['f_p1'])
+                        
+                        summ -= 20./9.*p*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m2'], this_proc_maps['f_p1'], this_proc_maps['f_p1'])
+                        summ -= 40./9.*p*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m2'], proc_maps['f_p1'], this_proc_maps['f_p1'])
+                        
+                        summ -= 2*(3+p)*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m1'], this_proc_maps['f_m1'], this_proc_maps['f_p2'])
+                        summ -= (3+p)*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m1'], this_proc_maps['f_m1'], proc_maps['f_p2'])
+                        
+                        summ += 10./3.*p*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m2'], this_proc_maps['f_p0'], this_proc_maps['f_p2'])
+                        summ += 10./3.*p*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m2'], proc_maps['f_p0'], this_proc_maps['f_p2'])
+                        summ += 10./3.*p*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m2'], this_proc_maps['f_p0'], proc_maps['f_p2'])
+                        
+                        summ -= 4./3.*p*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m2'], this_proc_maps['f_m1'], this_proc_maps['f_p3'])
+                        summ -= 4./3.*p*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m2'], proc_maps['f_m1'], this_proc_maps['f_p3'])
+                        summ -= 4./3.*p*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m2'], this_proc_maps['f_m1'], proc_maps['f_p3'])
+                        
+                        summ += 2./9.*p*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m2'], this_proc_maps['f_m2'], this_proc_maps['f_p4'])
+                        summ += 1./9.*p*self.utils.fnl_sum(self.r_weights[t], this_proc_maps['f_m2'], this_proc_maps['f_m2'], proc_maps['f_p4'])
+
+
+                        b1_num[index] += -3./5.*summ*self.base.A_pix/self.N_it
+                        index += 1
                         self.timers['fNL_summation'] += time.time()-t_init
                         
-                    if t=='neural':
+                    elif 'neural' in t:
+                        n = int(t.split('-')[1])
                         t_init = time.time()
                         
                         # Sum over permutations
-                        if not self.neural_cyclic:
-                            summ  = self.utils.neural_sum(self.r_weights[t], self.neural_weights, this_proc_maps['neural-alpha'], this_proc_maps['neural-beta'], proc_maps['neural-gamma'])
-                            summ += self.utils.neural_sum(self.r_weights[t], self.neural_weights, this_proc_maps['neural-alpha'], this_proc_maps['neural-gamma'], proc_maps['neural-beta'])
-                            summ += self.utils.neural_sum(self.r_weights[t], self.neural_weights, this_proc_maps['neural-beta'], this_proc_maps['neural-gamma'], proc_maps['neural-alpha'])
-                            b1_num[ii] += -3./5.*summ*self.base.A_pix/self.N_it
+                        if not self.neural_cyclic[n]:
+                            summ  = self.utils.neural_sum(self.r_weights[t], self.neural_weights[n], this_proc_maps['neural-alpha-%d'%n], this_proc_maps['neural-beta-%d'%n], proc_maps['neural-gamma-%d'%n])
+                            summ += self.utils.neural_sum(self.r_weights[t], self.neural_weights[n], this_proc_maps['neural-alpha-%d'%n], this_proc_maps['neural-gamma-%d'%n], proc_maps['neural-beta-%d'%n])
+                            summ += self.utils.neural_sum(self.r_weights[t], self.neural_weights[n], this_proc_maps['neural-beta-%d'%n], this_proc_maps['neural-gamma-%d'%n], proc_maps['neural-alpha-%d'%n])
+                            b1_num[index] += -3./5.*summ*self.base.A_pix/self.N_it
                         else:
-                            summ  = 2.*self.utils.neural_sum(self.r_weights[t], self.neural_weights, this_proc_maps['neural-alpha'], this_proc_maps['neural-beta'], proc_maps['neural-beta'])
-                            summ += self.utils.neural_sum(self.r_weights[t], self.neural_weights, this_proc_maps['neural-beta'], this_proc_maps['neural-beta'], proc_maps['neural-alpha'])
-                            b1_num[ii] += -3./5.*summ*self.base.A_pix/self.N_it
+                            summ  = 2.*self.utils.neural_sum(self.r_weights[t], self.neural_weights[n], this_proc_maps['neural-alpha-%d'%n], this_proc_maps['neural-beta-%d'%n], proc_maps['neural-beta-%d'%n])
+                            summ += self.utils.neural_sum(self.r_weights[t], self.neural_weights[n], this_proc_maps['neural-beta-%d'%n], this_proc_maps['neural-beta-%d'%n], proc_maps['neural-alpha-%d'%n])
+                            b1_num[index] += -3./5.*summ*self.base.A_pix/self.N_it
+                        index += 1
                         self.timers['fNL_summation'] += time.time()-t_init
                     
-                    if t=='isw-lensing':
+                    elif t=='isw-lensing':
                         t_init = time.time()
-               
+
                         # Sum over 3 permutations
                         summ =  isw_bispectrum_sum(proc_maps['u'], this_proc_maps['v'], this_proc_maps['v-isw'], self.base.nthreads)
                         summ += isw_bispectrum_sum(this_proc_maps['u'], proc_maps['v'], this_proc_maps['v-isw'], self.base.nthreads)
                         summ += isw_bispectrum_sum(this_proc_maps['u'], this_proc_maps['v'], proc_maps['v-isw'], self.base.nthreads)
-                        b1_num[ii] += -0.5*summ*self.base.A_pix/self.N_it
+                        b1_num[index] += -0.5*summ*self.base.A_pix/self.N_it
+                        index += 1
                         self.timers['lensing_summation'] += time.time()-t_init
-                                            
+
+                    elif t=='binned':
+
+                        t_init = time.time()
+                        self.utils.assemble_b1_binned(self.unique_bin_ids.astype(np.int32), self.k_triplet_ids.astype(np.int32), self.bin_degeneracy.astype(np.int32), b1_num, index, self.base.A_pix, self.N_it, self.r_weights[t], proc_maps['f_bin'], this_proc_maps['f_bin'])
+                        index += len(self.unique_bin_ids)
+                        self.timers['fNL_summation'] += time.time()-t_init
+                
         if include_linear_term:
             b_num = b3_num+b1_num
         else:
             b_num = b3_num
 
-        return b_num
+        if return_cubic:
+            return b_num, b3_num
+        else:
+            return b_num
 
     ### OPTIMIZATION
     @_timer_func('optimization')
-    def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_split=None, split_index=None, initial_r_points=None, verb=False, ideal_only=False):
+    def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_split=None, split_index=None, initial_r_points=None, verb=False, ideal_only=False, input_derivatives={}):
         """
         Compute the 1D radial sampling points and weights via optimization (as in Smith & Zaldarriaga 06), up to some tolerance in the Fisher distance.
         Optimization will be done for each template, analytically computing the 'distance' between template approximations
@@ -929,7 +1232,8 @@ class BSpecTemplate():
             - split_index (optional): Index of the chunk to optimize. 
             - initial_r_points (optional): Starting set of radial points (used for the final optimization step).
             - ideal_only (optional): Return the ideal Fisher matrix predictions without performing optimization.
-        
+            
+        Also, we can load precomputed Fisher derivatives via the input_derivatives input. These must be computed for the same reduce_r value!
         """
         assert self.ints_1d, "No 1D optimization is required for these templates!"
         t_init = time.time()
@@ -943,7 +1247,10 @@ class BSpecTemplate():
             print("## Caution: very sparse r-sampling requested; computation may be inaccurate")
         
         # Create radial array
-        r_raw = np.asarray(list(np.arange(1,self.r_star*0.95,50*reduce_r))+list(np.arange(self.r_star*0.95,self.r_hor*1.05,5*reduce_r))+list(np.arange(self.r_hor*1.05,self.r_hor+5000,50*reduce_r)))
+        r_raw = np.asarray(list(np.arange(1,self.r_star*0.95,50*reduce_r))+list(np.arange(self.r_star*0.95,self.r_hor*1.05,2.5*reduce_r))+list(np.arange(self.r_hor*1.05,self.r_hor+5000,50*reduce_r)))
+
+        #r_raw = np.asarray(list(np.geomspace(1,999,1000))+list(np.arange(1000,self.r_star*0.95,50*reduce_r))+list(np.arange(self.r_star*0.95,self.r_hor*1.05,5*reduce_r))+list(np.arange(self.r_hor*1.05,self.r_hor+5000,50*reduce_r)))
+        
         r_init = 0.5*(r_raw[1:]+r_raw[:-1])
         self.quad_weights_1d = r_init**2*np.diff(r_raw)
         r_weights = {}
@@ -952,7 +1259,7 @@ class BSpecTemplate():
         if initial_r_points is not None:
             assert split_index is None, "Cannot specify both initial_r_points and index_split"
             assert len(initial_r_points)==len(np.unique(initial_r_points)), "initial_r_points cannot contain repeated points"
-            inds = np.asarray([np.where(r==r_init)[0][0] for r in initial_r_points])
+            inds = np.asarray([np.where(np.abs(r_init - r) < 1e-10)[0][0] for r in initial_r_points])
             r_init = r_init[inds]
             self.quad_weights_1d = self.quad_weights_1d[inds]
         else:
@@ -968,7 +1275,7 @@ class BSpecTemplate():
         self._prepare_templates(ints_1d=True)
         
         # Reorder templates (keeping only those that require 1D optimization)
-        ordered_templates = [tem for tem in self.templates if tem in self.all_templates_1d]
+        ordered_templates = [tem for tem in self.templates if (tem in self.all_templates_1d) or ('neural' in tem)]
         
         # Create list of radial indices in the optimized representation
         inds = []
@@ -976,14 +1283,15 @@ class BSpecTemplate():
         
         # Compute all Fisher matrix derivatives of interest
         if verb: print("Computing all Fisher matrix derivatives")
-        derivs = self._compute_fisher_derivatives(ordered_templates, verb=verb)
+        derivs = self._compute_fisher_derivatives(ordered_templates, verb=verb, input_derivatives=input_derivatives)
+        self.derivatives = derivs
         
         # Save ideal Fisher matrices
         if not hasattr(self, 'ideal_fisher'):
             self.ideal_fisher = {}
         for t in ordered_templates:
             self.ideal_fisher[t] = derivs[t][0]
-        
+
         # Optionally exit and return ideal Fisher matrices
         if ideal_only:
             if verb: print("## Not performing optimization!")
@@ -1025,10 +1333,11 @@ class BSpecTemplate():
             else:
                 score = init_score
                 w_vals = []
+                G_mat = np.eye(0) # dummy variable
                 
             # Set up iteration
-            if score/init_score >= tolerance:
-                
+            if score/init_score >= tolerance and (np.diag(G_mat)>0).all():
+
                 # Define starting indices
                 if len(inds)==0:
                     next_ind = np.argsort(np.sum(deriv_matrix,axis=1)**2/np.diag(deriv_matrix))[-1]
@@ -1048,7 +1357,12 @@ class BSpecTemplate():
                     notinds = [i for i in np.arange(self.N_r) if i not in inds]
                     
                     # Set-up weights
-                    inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
+                    try:
+                        inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
+                    except:
+                        print("Singular matrix; exiting!")
+                        inds = inds[:-1]
+                        break
                     G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
                     
                     # Compute optimal quadratic weights
@@ -1066,6 +1380,8 @@ class BSpecTemplate():
                     # Finish if converged
                     if score/init_score < tolerance:
                         break
+
+                    # Check for errors
                     
                     # Update memory when score is accepted
                     w_vals_old = w_vals
@@ -1076,7 +1392,7 @@ class BSpecTemplate():
                     inds.append(next_ind)
                     
             if len(G_mat)==0:
-                raise Exception("Failed to converge after %d iterations; this indicates a bug!"%N_fish_optim)
+                raise Exception("Failed to converge; this indicates a bug!")
                 
             if verb: print("\nScore threshold met with %d indices"%len(inds))
             w_opt = np.asarray(w_vals.copy())
@@ -1118,7 +1434,7 @@ class BSpecTemplate():
         print("Computing Fisher matrix with seed %d"%seed)
         
         # Initialize output
-        fish = np.zeros((len(self.templates),len(self.templates)),dtype='complex')
+        fish = np.zeros((self.total_size, self.total_size),dtype='complex')
 
         # Compute two random realizations with known power spectrum, removing the beam
         if verb: print("# Generating GRFs")
@@ -1159,142 +1475,290 @@ class BSpecTemplate():
                 else:
                     Uinv_a_lms = [np.asarray(self.base.applyAinv(a_lm, input_type='harmonic')[:,self.lfilt],order='C') for a_lm in a_maps]
                 self.timers['Ainv'] += time.time()-t_init 
-            
-            # Filter maps
-            if verb: print("Computing filtered maps")
-            if 'q' in self.to_compute:
-                if verb: print("Creating Q maps")
-                Q_maps = self._filter_pair(Uinv_a_lms, 'Q')   
-            if 'p' in self.to_compute:
-                if verb: print("Creating P maps")
-                P_maps = self._filter_pair(Uinv_a_lms, 'P')   
-            if 'r1' in self.to_compute:
-                if verb: print("Creating R1 maps")
-                R1_maps = self._filter_pair(Uinv_a_lms, 'R1')   
-            if 'r2' in self.to_compute:
-                if verb: print("Creating R2 maps")
-                R2_maps = self._filter_pair(Uinv_a_lms, 'R2')   
-            if 'u' in self.to_compute:
-                if verb: print("Creating U maps")
-                U_maps = self._filter_pair(Uinv_a_lms, 'U')
-            if 'v' in self.to_compute:
-                if verb: print("Creating V maps")
-                V_maps = self._filter_pair(Uinv_a_lms, 'V')
-            if 'v-isw' in self.to_compute:
-                if verb: print("Creating ISW V maps")
-                V_isw_maps = self._filter_pair(Uinv_a_lms, 'V-ISW')
-            if self.neural_inputs is not None:
-                if verb: print("Creating neural maps")
-                neural_alphas = self._filter_pair(Uinv_a_lms, 'neural-alpha')
-                neural_betas = self._filter_pair(Uinv_a_lms, 'neural-beta')
-                if not self.neural_cyclic:
-                    neural_gammas = self._filter_pair(Uinv_a_lms, 'neural-gamma')
+
             
             # Define output arrays (Q11, Q22)
-            Qs = np.zeros((2,len(self.templates),1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128,order='C')
-            
-            # Compute products (with symmetries)
-            for ii,t in enumerate(self.templates):
-                if t=='fNL-loc':
-                    
-                    if verb: print("Computing Q-derivative for fNL-loc")
-
-                    # Iterate over both the 11 and 22 pieces
-                    for index in [0,1]:
-                        Qs[index,ii]  = 12./5.*self._transform_maps(self.utils.multiply(P_maps[index],Q_maps[index]),self.plXs,self.r_weights[t])
-                        Qs[index,ii] += 6./5.*self._transform_maps(self.utils.multiply(P_maps[index],P_maps[index]),self.qlXs,self.r_weights[t])
+            Qs = np.zeros((2,self.total_size,1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128,order='C')
+            # Iterate over radial indices
+            for radial_index in range(self.N_r):
+                if verb: print("Using radial index %d of %d"%(radial_index+1, self.N_r))
                 
-                if t=='fNL-eq':
+                # Filter maps
+                if (verb and radial_index==0): print("Computing filtered maps")
+                if 'f_p4' in self.to_compute:
+                    if (verb and radial_index==0): print("Creating F[+4] maps")
+                    Fp4_maps = self._filter_pair(Uinv_a_lms, 'F_p4', radial_index)   
+                if 'f_p3' in self.to_compute:
+                    if (verb and radial_index==0): print("Creating F[+3] maps")
+                    Fp3_maps = self._filter_pair(Uinv_a_lms, 'F_p3', radial_index)   
+                if 'f_p2' in self.to_compute:
+                    if (verb and radial_index==0): print("Creating F[+2] maps")
+                    Fp2_maps = self._filter_pair(Uinv_a_lms, 'F_p2', radial_index)   
+                if 'f_p1' in self.to_compute:
+                    if (verb and radial_index==0): print("Creating F[+1] maps")
+                    Fp1_maps = self._filter_pair(Uinv_a_lms, 'F_p1', radial_index)   
+                if 'f_p0' in self.to_compute:        
+                    if (verb and radial_index==0): print("Creating F[0] maps")
+                    Fp0_maps = self._filter_pair(Uinv_a_lms, 'F_p0', radial_index)
                     
-                    if verb: print("Computing Q-derivative for fNL-eq")
-
-                    # Iterate over both the 11 and 22 pieces
-                    for index in [0,1]:
-                        Qs[index,ii]  = 36./5.*self._transform_maps(self.utils.multiply(R1_maps[index],R2_maps[index]),self.plXs,self.r_weights[t])
-                        Qs[index,ii] += 36./5.*self._transform_maps(self.utils.multiply(P_maps[index],R2_maps[index]),self.r1lXs,self.r_weights[t])
-                        Qs[index,ii] += 36./5.*self._transform_maps(self.utils.multiply(P_maps[index],R1_maps[index]),self.r2lXs,self.r_weights[t])
-                        Qs[index,ii] -= 36./5.*self._transform_maps(self.utils.multiply(P_maps[index],Q_maps[index]),self.plXs,self.r_weights[t])
-                        Qs[index,ii] -= 18./5.*self._transform_maps(self.utils.multiply(P_maps[index],P_maps[index]),self.qlXs,self.r_weights[t])
-                        Qs[index,ii] -= 36./5.*self._transform_maps(self.utils.multiply(R2_maps[index],R2_maps[index]),self.r2lXs,self.r_weights[t])
-                        
-                if t=='neural':
+                if 'f_m1' in self.to_compute:
+                    if (verb and radial_index==0): print("Creating F[-1] maps")
+                    Fm1_maps = self._filter_pair(Uinv_a_lms, 'F_m1', radial_index)   
+                if 'f_m2' in self.to_compute:
+                    if (verb and radial_index==0): print("Creating F[-2] maps")
+                    Fm2_maps = self._filter_pair(Uinv_a_lms, 'F_m2', radial_index)   
+                if 'f_bin' in self.to_compute:
+                    if (verb and radial_index==0): print("Creating binned F maps")
+                    F_bin_maps = self._filter_pair(Uinv_a_lms, 'F_bin', radial_index)[:,:,None,:]
                     
-                    if verb: print("Computing Q-derivative for neural fNL")
-
-                    # Iterate over both the 11 and 22 pieces
-                    for index in [0,1]:
-                        for iterm in range(self.neural_terms):
-                            if not self.neural_cyclic:
-                                Qs[index,ii] += 6./5.*self.neural_weights[iterm]*self._transform_maps(self.utils.multiply(neural_alphas[iterm][index],neural_betas[iterm][index]),self.gamma_lXs[iterm],self.r_weights[t])
-                                Qs[index,ii] += 6./5.*self.neural_weights[iterm]*self._transform_maps(self.utils.multiply(neural_betas[iterm][index],neural_gammas[iterm][index]),self.alpha_lXs[iterm],self.r_weights[t])
-                                Qs[index,ii] += 6./5.*self.neural_weights[iterm]*self._transform_maps(self.utils.multiply(neural_gammas[iterm][index],neural_alphas[iterm][index]),self.beta_lXs[iterm],self.r_weights[t])
-                            else:
-                                Qs[index,ii] += 12./5.*self.neural_weights[iterm]*self._transform_maps(self.utils.multiply(neural_alphas[iterm][index],neural_betas[iterm][index]),self.beta_lXs[iterm],self.r_weights[t])
-                                Qs[index,ii] += 6./5.*self.neural_weights[iterm]*self._transform_maps(self.utils.multiply(neural_betas[iterm][index],neural_betas[iterm][index]),self.alpha_lXs[iterm],self.r_weights[t])
+                if self.neural_inputs is not None:
+                    if (verb and radial_index==0): print("Creating neural maps")
+                    neural_alphas, neural_betas, neural_gammas = {},{},{}
+                    for n in self.neural_inds:
+                        neural_alphas[n] = self._filter_pair(Uinv_a_lms, 'neural-alpha-%d'%n, radial_index)
+                        neural_betas[n] = self._filter_pair(Uinv_a_lms, 'neural-beta-%d'%n, radial_index)
+                        if not self.neural_cyclic[n]:
+                            neural_gammas[n] = self._filter_pair(Uinv_a_lms, 'neural-gamma-%d'%n, radial_index)
                 
-                if t=='isw-lensing':
-                    if verb: print("Computing Q-derivative for isw-lensing")
+                if radial_index==0:
+                    if 'u' in self.to_compute:
+                        if verb: print("Creating U maps")
+                        U_maps = self._filter_pair(Uinv_a_lms, 'U')
                     
-                    # Iterate over both the 11 and 22 pieces
-                    for index in [0,1]:
+                    if 'v' in self.to_compute:
+                        if verb: print("Creating V maps")
+                        V_maps = self._filter_pair(Uinv_a_lms, 'V')
+                    
+                    if 'v-isw' in self.to_compute:
+                        if verb: print("Creating ISW V maps")
+                        V_isw_maps = self._filter_pair(Uinv_a_lms, 'V-ISW')
+
+                # Compute products (with symmetries)
+                q_index = 0
+                for t in self.templates:
+                    
+                    def get_map(i,index):
+                        if i==-2:
+                            return Fm2_maps[index]
+                        elif i==-1:
+                            return Fm1_maps[index]
+                        elif i==0:
+                            return Fp0_maps[index]
+                        elif i==1:
+                            return Fp1_maps[index]
+                        elif i==2:
+                            return Fp2_maps[index]
+                        elif i==3:
+                            return Fp3_maps[index]
+                        elif i==4:
+                            return Fp4_maps[index]
+                        else:
+                            raise Exception()
+
+                    def mult(i,j,index):
+                        return self.utils.multiply(get_map(i,index),get_map(j,index))
+
+                    def mult_bin(i,j,index):
+                        return self.utils.multiply(F_bin_maps[index,i],F_bin_maps[index,j])
+
+                    def transform(prod_map, k):
+                        if k==-2:
+                            filt = self.flXs_m2
+                        elif k==-1:
+                            filt = self.flXs_m1
+                        elif k==0:
+                            filt = self.flXs_p0
+                        elif k==1:
+                            filt = self.flXs_p1
+                        elif k==2:
+                            filt = self.flXs_p2
+                        elif k==3:
+                            filt = self.flXs_p3
+                        elif k==4:
+                            filt = self.flXs_p4
+                        else:
+                            raise Exception()
+                        return 6./5.*self._transform_maps(prod_map, filt[:,:,[radial_index]], self.r_weights[t][[radial_index]])
+    
+                    def transform_bin(prod_map, k):
+                        filt = np.asarray(self.flXs_bin[:,:,[radial_index],k], order='C')
+                        return 6./5.*self._transform_maps(None, filt, self.r_weights[t][[radial_index]], lm_map=prod_map)
+                    
+                    if t=='fNL-loc':
+                        if (verb and radial_index==0): print("Computing Q-derivative for fNL-loc")
+    
+                        # Iterate over both the 11 and 22 pieces
+                        for index in [0,1]:
+                            Qs[index,q_index] += 2.*transform(mult(-1,+2,index),-1)
+                            Qs[index,q_index] += transform(mult(-1,-1,index),+2)
+                        q_index += 1
+
+                    elif t=='fNL-eq':
+                        if (verb and radial_index==0): print("Computing Q-derivative for fNL-eq")
+
+                        # Iterate over both the 11 and 22 pieces
+                        for index in [0,1]:
+                            Qs[index,q_index] += 6.*transform(mult(+1,0,index)-mult(-1,+2,index),-1)
+                            Qs[index,q_index] += 6.*transform(mult(-1,+1,index)-mult(0,0,index),0)
+                            Qs[index,q_index] += 6.*transform(mult(-1,0,index),+1)
+                            Qs[index,q_index] -= 3.*transform(mult(-1,-1,index),+2)
+                        q_index += 1
+
+                    elif t=='fNL-orth':
+                        if (verb and radial_index==0): print("Computing Q-derivative for fNL-orth")
                         
-                        ## First term
-                        # X = T
-                        input_map = 2.*np.real(V_maps[index][0]*V_isw_maps[index].conjugate())
-                        Qs[index,ii,0] = self.base.to_lm(input_map[None],lmax=self.lmax)[0,self.lminfilt]
-                        if self.pol:
-                            # X = E, B
-                            input_map = V_maps[index][1]*V_isw_maps[index].conjugate() - V_maps[index][2]*V_isw_maps[index]
-                            output_lm = 0.5*self.base.to_lm_spin(input_map[None],input_map[None].conjugate(),spin=2,lmax=self.lmax)[:,self.lminfilt]
-                            Qs[index,ii,1] = output_lm[0] + output_lm[1]
-                            Qs[index,ii,2] = -1.0j*(output_lm[0] - output_lm[1])
-                                
-                        ## Second term
-                        # Y = T
-                        pref = np.sqrt(self.ls*(self.ls+1.))
-                        input_map = U_maps[index][0]*V_isw_maps[index] 
-                        out_lm = self.base.to_lm_spin(input_map.conjugate(), input_map, spin=1, lmax=self.lmax)[:,self.lminfilt].copy()
-                        Qs[index,ii,0] += -self.C_lens_weight['TT'][self.ls]*pref*(out_lm[0]-out_lm[1])
-                        if self.pol:
-                            Qs[index,ii,1] += -self.C_lens_weight['TE'][self.ls]*pref*(out_lm[0]-out_lm[1])
+                        # Iterate over both the 11 and 22 pieces
+                        for index in [0,1]:
+                            Qs[index,q_index] += 18*transform(mult(+1,0,index)-mult(-1,2,index),-1)
+                            Qs[index,q_index] += transform(18*mult(-1,+1,index)-24*mult(0,0,index),0)
+                            Qs[index,q_index] += 18*transform(mult(-1,0,index),+1)
+                            Qs[index,q_index] -= 9*transform(mult(-1,-1,index),+2)
+                        q_index += 1
+                    
+                    elif t=='fNL-orth2':
+                        if (verb and radial_index==0): print("Computing Q-derivative for fNL-orth2")
+                        p = 27./(743./(7.*(20*np.pi**2.-193.))-21.)
+                        
+                        # Iterate over both the 11 and 22 pieces
+                        for index in [0,1]:
+                            Qs[index,q_index] += 2./9.*p*transform(-10*mult(1,1,index)+15.*mult(0,2,index)-6*mult(-1,3,index)+mult(-2,4,index),-2)
+                            Qs[index,q_index] -= 2./3.*transform(-(9+5*p)*mult(0,1,index)+3*(3+p)*mult(-1,2,index)+2*p*mult(-2,3,index),-1)
+                            Qs[index,q_index] += 2./3.*transform(-(9+10.*p)*mult(0,0,index)+(9+5.*p)*mult(-1,1,index)+5*p*mult(-2,2,index),0)
+                            Qs[index,q_index] += transform(2./3.*(9+5.*p)*mult(-1,0,index)-40./9.*p*mult(-2,1,index),1)
+                            Qs[index,q_index] += transform(-(3+p)*mult(-1,-1,index)+10./3.*p*mult(-2,0,index),2)
+                            Qs[index,q_index] -= 4./3.*p*transform(mult(-2,-1,index),3)
+                            Qs[index,q_index] += 1./9.*p*transform(mult(-2,-2,index),4)
+                        q_index += 1
 
-                            # Y = E, B
-                            prefP = np.sqrt((self.ls+2.)*(self.ls-1.))
-                            prefM = np.sqrt((self.ls-2.)*(self.ls+3.)) 
+                    elif 'neural' in t:
+                        n = int(t.split('-')[1])
+                        if verb: print("Computing Q-derivative for neural-%d fNL"%n)
+                        
+                        # Iterate over both the 11 and 22 pieces
+                        for index in [0,1]:
+                            for iterm in range(self.neural_terms[n]):
+                                if not self.neural_cyclic[n]:
+                                    Qs[index,q_index] += 6./5.*self.neural_weights[n][iterm]*self._transform_maps(self.utils.multiply(neural_alphas[n][iterm][index],neural_betas[n][iterm][index]),self.gamma_lXs[n][iterm][:,:,[radial_index]],self.r_weights[t][[radial_index]])
+                                    Qs[index,q_index] += 6./5.*self.neural_weights[n][iterm]*self._transform_maps(self.utils.multiply(neural_betas[n][iterm][index],neural_gammas[n][iterm][index]),self.alpha_lXs[n][iterm][:,:,[radial_index]],self.r_weights[t][[radial_index]])
+                                    Qs[index,q_index] += 6./5.*self.neural_weights[n][iterm]*self._transform_maps(self.utils.multiply(neural_gammas[n][iterm][index],neural_alphas[n][iterm][index]),self.beta_lXs[n][iterm][:,:,[radial_index]],self.r_weights[t][[radial_index]])
+                                else:
+                                    Qs[index,q_index] += 12./5.*self.neural_weights[n][iterm]*self._transform_maps(self.utils.multiply(neural_alphas[n][iterm][index],neural_betas[n][iterm][index]),self.beta_lXs[n][iterm][:,:,[radial_index]],self.r_weights[t][[radial_index]])
+                                    Qs[index,q_index] += 6./5.*self.neural_weights[n][iterm]*self._transform_maps(self.utils.multiply(neural_betas[n][iterm][index],neural_betas[n][iterm][index]),self.alpha_lXs[n][iterm][:,:,[radial_index]],self.r_weights[t][[radial_index]])
+                        q_index += 1
 
-                            # Compute spin-1 transforms
-                            input_map = (U_maps[index][1] + 1.0j*U_maps[index][2])*V_isw_maps[index]
-                            out_lm1 = self.base.to_lm_spin(input_map, input_map.conjugate(), spin=1, lmax=self.lmax)[:,self.lminfilt]
+                    elif t=='binned':
+                        if verb and (radial_index==0): print("Computing Q-derivative for the binned bispectrum")
                             
-                            # Compute spin-3 transforms
-                            input_map = -(U_maps[index][1] + 1.0j*U_maps[index][2])*V_isw_maps[index].conjugate()                        
-                            out_lm3 = self.base.to_lm_spin(input_map, input_map.conjugate(), spin=3, lmax=self.lmax)[:,self.lminfilt]
-
-                            # Assemble output
-                            diff_lm = prefP*(out_lm1[0]-out_lm1[1]) + prefM*(out_lm3[0]-out_lm3[1])
-                            sum_lm = prefP*(out_lm1[0]+out_lm1[1]) + prefM*(out_lm3[0]+out_lm3[1])
-                            Qs[index,ii,0] += 0.5*self.C_lens_weight['TE'][self.ls]*diff_lm
-                            Qs[index,ii,1] += 0.5*self.C_lens_weight['EE'][self.ls]*diff_lm
-                            Qs[index,ii,2] += -1.0j*0.5*self.C_lens_weight['BB'][self.ls]*sum_lm
-                            del out_lm1, out_lm3, diff_lm, sum_lm, prefP, prefM
+                        # Define all possible pairs of bins
+                        unique_pairs12 = np.unique(self.k_triplet_ids[:,[0,1]], axis=0)
+                        unique_pairs31 = np.unique(self.k_triplet_ids[:,[2,0]], axis=0)
+                        unique_pairs23 = np.unique(self.k_triplet_ids[:,[1,2]], axis=0)
+                        unique_pairs = np.unique(np.concatenate([unique_pairs12, unique_pairs23, unique_pairs31]), axis=0)
                         
-                        ## Third term
-                        input_map = U_maps[index][0]*V_maps[index][0].conjugate()
-                        if not self.pol:
+                        # Iterate over pairs (to avoid recomputing harmonic transforms)
+                        for pair in unique_pairs:
+                            binA, binB = pair
+    
+                            # Compute possible third k-bin (symmetrizing over permutations)
+                            last_bins = []
+                            if pair in unique_pairs12:
+                                bin_indices = np.where((self.k_triplet_ids[:,[0,1]]==[binA,binB]).all(1))[0]
+                                for bin_index in bin_indices:
+                                    binC,bin_id = self.k_triplet_ids[bin_index,[2,3]]
+                                    last_bins.append([binC,bin_id,self.bin_degeneracy[bin_index]])
+                            if pair in unique_pairs31:
+                                bin_indices = np.where((self.k_triplet_ids[:,[2,0]]==[binA,binB]).all(1))[0]
+                                for bin_index in bin_indices:
+                                    binC,bin_id = self.k_triplet_ids[bin_index,[1,3]]
+                                    last_bins.append([binC,bin_id,self.bin_degeneracy[bin_index]])
+                            if pair in unique_pairs23:
+                                bin_indices = np.where((self.k_triplet_ids[:,[1,2]]==[binA,binB]).all(1))[0]
+                                for bin_index in bin_indices:
+                                    binC,bin_id = self.k_triplet_ids[bin_index,[0,3]]
+                                    last_bins.append([binC,bin_id,self.bin_degeneracy[bin_index]])
+                            
+                            # Count up how many times each pair occurred
+                            last_bins, counts = np.unique(last_bins,axis=0,return_counts=True)
+                            
+                            # Iterate over both the 11 and 22 pieces and compute output
+                            for index in [0,1]:
+                                # Compute harmonic transforms of the pairwise products
+                                prod_map_lm = np.asarray(self.base.to_lm_vec(mult_bin(binA, binB, index), lmax=self.lmax)[0,self.lminfilt], order='C')
+                                
+                                # Assemble output
+                                self.utils.assemble_binned_bispectrum_Q(last_bins.astype(np.int32), counts.astype(np.int32), prod_map_lm, self.flXs_bin, radial_index, self.r_weights[t], Qs[index], q_index)
+                            
+                        # Update output index
+                        q_index += self.n_binned
+
+                    elif t=='isw-lensing':
+                        if radial_index >0:
+                            q_index += 1
+                            continue
+                        
+                        if (verb and radial_index==0): print("Computing Q-derivative for isw-lensing")
+                        
+                        # Iterate over both the 11 and 22 pieces
+                        for index in [0,1]:
+                            
+                            ## First term
+                            # X = T
+                            input_map = 2.*np.real(V_maps[index][0]*V_isw_maps[index].conjugate())
+                            Qs[index,q_index,0] = self.base.to_lm(input_map[None],lmax=self.lmax)[0,self.lminfilt]
+                            if self.pol:
+                                # X = E, B
+                                input_map = V_maps[index][1]*V_isw_maps[index].conjugate() - V_maps[index][2]*V_isw_maps[index]
+                                output_lm = 0.5*self.base.to_lm_spin(input_map[None],input_map[None].conjugate(),spin=2,lmax=self.lmax)[:,self.lminfilt]
+                                Qs[index,q_index,1] = output_lm[0] + output_lm[1]
+                                Qs[index,q_index,2] = -1.0j*(output_lm[0] - output_lm[1])
+                                    
+                            ## Second term
+                            # Y = T
+                            pref = np.sqrt(self.ls*(self.ls+1.))
+                            input_map = U_maps[index][0]*V_isw_maps[index] 
+                            out_lm = self.base.to_lm_spin(input_map.conjugate(), input_map, spin=1, lmax=self.lmax)[:,self.lminfilt].copy()
+                            Qs[index,q_index,0] += -self.C_lens_weight['TT'][self.ls]*pref*(out_lm[0]-out_lm[1])
+                            if self.pol:
+                                Qs[index,q_index,1] += -self.C_lens_weight['TE'][self.ls]*pref*(out_lm[0]-out_lm[1])
+    
+                                # Y = E, B
+                                prefP = np.sqrt((self.ls+2.)*(self.ls-1.))
+                                prefM = np.sqrt((self.ls-2.)*(self.ls+3.)) 
+    
+                                # Compute spin-1 transforms
+                                input_map = (U_maps[index][1] + 1.0j*U_maps[index][2])*V_isw_maps[index]
+                                out_lm1 = self.base.to_lm_spin(input_map, input_map.conjugate(), spin=1, lmax=self.lmax)[:,self.lminfilt]
+                                
+                                # Compute spin-3 transforms
+                                input_map = -(U_maps[index][1] + 1.0j*U_maps[index][2])*V_isw_maps[index].conjugate()                        
+                                out_lm3 = self.base.to_lm_spin(input_map, input_map.conjugate(), spin=3, lmax=self.lmax)[:,self.lminfilt]
+    
+                                # Assemble output
+                                diff_lm = prefP*(out_lm1[0]-out_lm1[1]) + prefM*(out_lm3[0]-out_lm3[1])
+                                sum_lm = prefP*(out_lm1[0]+out_lm1[1]) + prefM*(out_lm3[0]+out_lm3[1])
+                                Qs[index,q_index,0] += 0.5*self.C_lens_weight['TE'][self.ls]*diff_lm
+                                Qs[index,q_index,1] += 0.5*self.C_lens_weight['EE'][self.ls]*diff_lm
+                                Qs[index,q_index,2] += -1.0j*0.5*self.C_lens_weight['BB'][self.ls]*sum_lm
+                                del out_lm1, out_lm3, diff_lm, sum_lm, prefP, prefM
+                            
+                            ## Third term
                             input_map = U_maps[index][0]*V_maps[index][0].conjugate()
-                            Qs[index,ii,0] += -self.C_Tphi[self.ls]*np.sqrt(self.ls*(self.ls+1.))*np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conjugate(), spin=1,lmax=self.lmax)[:,self.lminfilt],axis=0)
-                        else: 
-                            input_map = 2.*U_maps[index][0]*V_maps[index][0].conjugate()
-                            input_map += (U_maps[index][1] + 1.0j*U_maps[index][2])*V_maps[index][1].conjugate() + (-U_maps[index][1].conjugate() + 1.0j*U_maps[index][2].conjugate())*V_maps[index][2]
-                            out_lm = np.sqrt(self.ls*(self.ls+1.))*np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conjugate(), spin=1,lmax=self.lmax)[:,self.lminfilt],axis=0)
-                            Qs[index,ii,0] += -0.5*self.C_Tphi[self.ls]*out_lm
-                            Qs[index,ii,1] += -0.5*self.C_Ephi[self.ls]*out_lm
-                            del out_lm
+                            if not self.pol:
+                                input_map = U_maps[index][0]*V_maps[index][0].conjugate()
+                                Qs[index,q_index,0] += -self.C_Tphi[self.ls]*np.sqrt(self.ls*(self.ls+1.))*np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conjugate(), spin=1,lmax=self.lmax)[:,self.lminfilt],axis=0)
+                            else: 
+                                input_map = 2.*U_maps[index][0]*V_maps[index][0].conjugate()
+                                input_map += (U_maps[index][1] + 1.0j*U_maps[index][2])*V_maps[index][1].conjugate() + (-U_maps[index][1].conjugate() + 1.0j*U_maps[index][2].conjugate())*V_maps[index][2]
+                                out_lm = np.sqrt(self.ls*(self.ls+1.))*np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conjugate(), spin=1,lmax=self.lmax)[:,self.lminfilt],axis=0)
+                                Qs[index,q_index,0] += -0.5*self.C_Tphi[self.ls]*out_lm
+                                Qs[index,q_index,1] += -0.5*self.C_Ephi[self.ls]*out_lm
+                                del out_lm
+                        q_index += 1
                     
             if weighting=='Ainv' and verb: print("Applying S^-1 weighting to output")
-            for qindex in range(2):
-                self._weight_Q_maps(Qs[qindex], weighting)
-            return Qs.reshape(2,len(self.templates),-1)
+            for findex in range(2):
+                self._weight_Q_maps(Qs[findex], weighting)
+            return Qs.reshape(2,self.total_size,-1)
 
         # Compute Q3 maps
         if verb: print("\n# Computing Q3 map for S^-1 weighting")
@@ -1318,7 +1782,7 @@ class BSpecTemplate():
         For high-dimensional problems, it is usually preferred to split the computation across a cluster with MPI, calling compute_fisher_contribution for each instead of this function.
         """
         # Initialize output
-        fish = np.zeros((len(self.templates),len(self.templates)))
+        fish = np.zeros((self.total_size,self.total_size))
         
         # Iterate over N_it seeds
         for seed in range(N_it):

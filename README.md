@@ -2,7 +2,7 @@
 
 # PolySpec
 PolySpec (formerly PolyBin) is a Python code that estimates $N$-point correlation functions for 2D HEALPix maps, optionally with spin (e.g., CMB temperature, polarization, galaxy positions and cosmic shear). There are two main functionalities:
-- **Templates**: This directly estimates the amplitude of inflationary templates in CMB data, such as fNL, gNL or tauNL, in addition to late time templates such as CMB lensing. This includes fourteen types of trispectrum estimator and two types of bispectrum estimator (see below), and provides quasi-optimal estimates of the template amplitudes, accounting for arbitrary beams, masks, and filtering. 
+- **Templates**: This directly estimates the amplitude of inflationary templates in CMB data, such as fNL, gNL or tauNL, in addition to late time templates such as CMB lensing. This includes fourteen types of trispectrum estimator and several types of bispectrum estimator (see below), and provides quasi-optimal estimates of the template amplitudes, accounting for arbitrary beams, masks, and filtering.
 - **Binned Statistics**: This estimates the binned power spectrum, bispectrum and trispectrum of a 2D field, accounting for correlations between bins. For each statistic, two estimators are available: the standard/ideal estimators (i.e. pseudo-Cl), which do not take into account the mask, and window-deconvolved estimators, which do. In the second case, we require computation of a numerical Fisher matrix; this depends on binning and the mask, but does not need to be recomputed for each new simulation. For the bispectrum and trispectrum, we can compute both the *parity-even* and *parity-odd* components, accounting for any leakage between the two.
 
 PolySpec contains the following main modules:
@@ -15,6 +15,9 @@ PolySpec contains the following main modules:
 In the templates classes, we include estimators for the following types of bispectra:
 - `fNL-loc`: Quadratic local templates
 - `fNL-eq`: Equilateral template, arising from inflaton self-interactions
+- `fNL-orth`: Orthogonal template, arising from inflaton self-interactions. We use the same convention as Planck.
+- `fNL-orth2`: Alternative orthogonal basis, arising from inflaton self-interactions. This uses the large-scale structure definition (which features the correct squeezed limit).
+- `binned`: Binned primordial bispectrum in Fourier space
 - `isw-lensing`: Lensing-ISW cross-correlations (i.e. the lensing bispectrum)
 - `neural`: General factorizable basis functions, parametrized by neural networks. The usage for this feature is described in the [separable_bk](https://github.com/KunhaoZhong/separable_bk) repository.
 

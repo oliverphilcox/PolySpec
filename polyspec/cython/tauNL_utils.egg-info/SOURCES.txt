@@ -1,8 +1,0 @@
-setup.py
-tauNL_utils.cpp
-wignerSymbols-cpp.cpp
-wignerSymbols-cpp.h
-tauNL_utils.egg-info/PKG-INFO
-tauNL_utils.egg-info/SOURCES.txt
-tauNL_utils.egg-info/dependency_links.txt
-tauNL_utils.egg-info/top_level.txt

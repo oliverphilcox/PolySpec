@@ -719,8 +719,8 @@ class BSpecBin():
                                                             out_value = value.real
                                                         else:
                                                             out_value = value.imag
-                                                        fish[chi_index*self.N_b//2+index, chi_index_p*self.N_b//2+index_p] = out_value/self.sym_factor[index]/self.sym_factor[index_p]
-                                                        fish[chi_index_p*self.N_b//2+index_p, chi_index*self.N_b//2+index] = out_value/self.sym_factor[index]/self.sym_factor[index_p]
+                                                        fish[chi_index*self.N_b//2+index, chi_index_p*self.N_b//2+index_p] = out_value
+                                                        fish[chi_index_p*self.N_b//2+index_p, chi_index*self.N_b//2+index] = out_value
             return fish
         
         
@@ -737,6 +737,9 @@ class BSpecBin():
 
             result = list(tqdm.tqdm(p.imap_unordered(_iterator,range(self.N_b//degeneracy)),total=self.N_b//degeneracy))
             fish = np.sum(result,axis=0)
+
+        # Apply symmetry factor normalization via outer product
+        fish *= 1./np.outer(self.sym_factor, self.sym_factor)
 
         if verb: print("Fisher matrix computation complete\n")
         self.fish_ideal = fish

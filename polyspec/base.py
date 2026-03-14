@@ -46,22 +46,20 @@ class PolySpec():
                 Cl_tot['TB'] = Cl_tot['EB'] = 0.*Cl_tot['TT']
         for k in Cl_tot.keys():
             assert len(Cl_tot[k])>=len(ls), "Cl_tot must contain every ell mode from l=0 to l=lmax!"
-        self.Cl_tot = Cl_tot.copy()
-        
+        self.Cl_tot = {k: Cl_tot[k][:len(ls)] for k in Cl_tot.keys()}
+
         if len(beam)==0:
             self.beam = np.asarray([1.+0.*self.Cl_tot['TT'] for _ in range(1+2*self.pol)])
         else:
             if self.pol:
                 assert len(beam)==2 or len(beam)==3, "Beam must contain temperature and polarization or T/E/B components"
                 if len(beam)==2:
-                    self.beam = np.asarray([beam[0].copy(),beam[1].copy(),beam[1].copy()])
+                    self.beam = np.asarray([beam[0][:len(ls)],beam[1][:len(ls)],beam[1][:len(ls)]])
                 else:
-                    self.beam = np.asarray([beam[0].copy(),beam[1].copy(),beam[2].copy()])
+                    self.beam = np.asarray([beam[0][:len(ls)],beam[1][:len(ls)],beam[2][:len(ls)]])
             else:
-                assert (len(beam)==1 or len(beam)==len(Cl_tot['TT'])), "Beam must contain the same ells as Cl_tot"
-                self.beam = np.asarray(beam).copy().reshape(1,-1)
-        for i in range(len(self.beam)):
-            assert len(self.beam[i])>=len(ls), "Beam must contain every ell mode from l=0 to l=lmax!"
+                assert len(beam)==1, "For unpolarized beams, beam must be a list with one spectrum"
+                self.beam = np.asarray(beam).copy().reshape(1,-1)[:,:len(ls)]
                 
         # Define m weights (for complex conjugates)
         self.m_weight = (1.+1.*(self.m_arr>0.))
@@ -182,55 +180,80 @@ class PolySpec():
         If spin!=0 this will return both +s and -s harmonics, and input_vec is expected to be [(+s)input(n), (-s)input(n)].
 
         This uses either HEALPix or DUCC, depending on the backend chosen."""
-        self.n_SHTs_forward += len(input_vec)
-        if lmax==None:
+        if lmax is None:
             lmax = self.lmax
-        
-        if spin==0:
-            if self.backend=='healpix':
-                return healpy.map2alm(input_vec, pol=False, iter=0, lmax=lmax) # no iteration
-            elif self.backend=='ducc':
-                return self.sht_lib.adjoint_synthesis(lmax=lmax, spin=0, map=input_vec[:,None,:], nthreads=self.nthreads, mmax=lmax, theta_interpol=False,**self.ducc_geom)[:,0,:]*np.pi/(3.*self.Nside**2)
+
+        if spin == 0:
+            if not input_vec.flags['C_CONTIGUOUS']:
+                input_vec = np.ascontiguousarray(input_vec)
+            
+            self.n_SHTs_forward += input_vec.shape[0]
+
+            if self.backend == 'healpix':
+                return healpy.map2alm(input_vec, pol=False, iter=0, lmax=lmax)
+            
+            elif self.backend == 'ducc':
+                norm_factor = np.pi / (3. * self.Nside**2)
+                out = self.sht_lib.adjoint_synthesis(lmax=lmax, spin=0, map=input_vec[:, None, :], nthreads=self.nthreads, mmax=lmax, theta_interpol=False, **self.ducc_geom)[:, 0, :]
+                out *= norm_factor
+                return out
+
         else:
-            assert spin>0, "Spin must be positive!"
+            assert spin > 0, "Spin must be positive!"
+            assert len(input_vec) == 2, "Must input both +s and -s maps"
 
-            assert len(input_vec)==2, "Must input both +s and -s maps"
+            n_batch = input_vec[0].shape[0]
+            self.n_SHTs_forward += n_batch
+
+            # Convert to Real/Imag
+            map_inputs = self.to_real_imag(input_vec[0], input_vec[1])
             
-            # Define inputs
-            map_inputs = self.to_real_imag(input_vec[0],input_vec[1])
+            if not map_inputs.flags['C_CONTIGUOUS']:
+                map_inputs = np.ascontiguousarray(map_inputs)
+
+            if self.backend == 'healpix':
+                lm_outputs = np.array([healpy.map2alm_spin([map_inputs[r, 0], map_inputs[r, 1]], spin, lmax) for r in range(n_batch)])
+                
+            elif self.backend == 'ducc':
+                norm_factor = np.pi / (3. * self.Nside**2)
+                lm_outputs = self.sht_lib.adjoint_synthesis(lmax=lmax, spin=spin, 
+                    map=map_inputs, nthreads=self.nthreads, mmax=lmax, theta_interpol=False, **self.ducc_geom)
+                lm_outputs *= norm_factor
             
-            # Perform transformation
-            if self.backend=='healpix':
-                lm_outputs = np.asarray([healpy.map2alm_spin([map_inputs[r,0],map_inputs[r,1]],spin,lmax) for r in range(len(input_vec))])
-            elif self.backend=='ducc':
-                lm_outputs = self.sht_lib.adjoint_synthesis(lmax=lmax, spin=spin, map=map_inputs, nthreads=self.nthreads, mmax=lmax, theta_interpol=False,**self.ducc_geom)*np.pi/(3.*self.Nside**2)
-            
-            # Reconstruct output and return
             return self.to_plus_minus_complex(lm_outputs, spin)
-
+    
     @timer_func
     def to_map_vec(self, input_lm_vec, output_spin=0, lmax=None):
-        """Convert a vector of spin-0 harmonic coefficients to map-space. If spin!=0 this will return both +s and -s maps.
-
-        This uses either HEALPix or DUCC, depending on the backend chosen."""
+        """Convert a vector of spin-0 harmonic coefficients to map-space. If spin!=0 this will return both +s and -s maps. This uses either HEALPix or DUCC, depending on the backend chosen."""
         self.n_SHTs_reverse += len(input_lm_vec)
-        if lmax==None:
+        if lmax is None:
             lmax = self.lmax
-        assert len(input_lm_vec[0])==(lmax+1)*(lmax+2)//2, "Wrong number of alm coefficients!"
         
-        if output_spin==0:
-            if self.backend=='healpix':
-                return healpy.alm2map(input_lm_vec, self.Nside, pol=False, lmax=lmax)
-            elif self.backend=='ducc':
-                return self.sht_lib.synthesis(alm=input_lm_vec[:,None,:], lmax=lmax, spin=0, nthreads=self.nthreads, mmax=lmax, theta_interpol=False, **self.ducc_geom)[:,0,:]
-        else:
-            if self.backend=='healpix':
-                map_outputs = np.asarray([healpy.alm2map_spin([-input_lm_vec[r],0.*input_lm_vec[r]],self.Nside,output_spin,lmax) for r in range(len(input_lm_vec))])
-            elif self.backend=='ducc':
-                map_outputs = self.sht_lib.synthesis(alm=np.stack([-input_lm_vec,np.zeros_like(input_lm_vec)],axis=1),
-                                                     lmax=lmax, spin=output_spin, nthreads=self.nthreads, mmax=lmax, theta_interpol=False, **self.ducc_geom)
-            return self.to_plus_minus(map_outputs)
+        if not input_lm_vec.flags['C_CONTIGUOUS']:
+            input_lm_vec = np.ascontiguousarray(input_lm_vec)
             
+        assert input_lm_vec.shape[1] == (lmax+1)*(lmax+2)//2, "Wrong number of alm coefficients!"
+        
+        if output_spin == 0:
+            if self.backend == 'healpix':
+                return healpy.alm2map(input_lm_vec, self.Nside, pol=False, lmax=lmax)
+            elif self.backend == 'ducc':
+                return self.sht_lib.synthesis(alm=input_lm_vec[:, None, :], 
+                                              lmax=lmax, spin=0, 
+                                              nthreads=self.nthreads, mmax=lmax, 
+                                              theta_interpol=False, **self.ducc_geom)[:, 0, :]
+        else:
+            if self.backend == 'healpix':
+                zeros = np.zeros_like(input_lm_vec[0])
+                return np.array([healpy.alm2map_spin([-input_lm_vec[r], zeros], 
+                                        self.Nside, output_spin, lmax) for r in range(len(input_lm_vec))])
+                
+            elif self.backend == 'ducc':
+                alm_buffer = np.zeros((input_lm_vec.shape[0], 2, input_lm_vec.shape[1]), dtype=np.complex128)
+                alm_buffer[:, 0, :] = -input_lm_vec
+                map_outputs = self.sht_lib.synthesis(alm=alm_buffer, lmax=lmax, spin=output_spin,nthreads=self.nthreads, mmax=lmax, theta_interpol=False, **self.ducc_geom)
+            return self.to_plus_minus(map_outputs)
+    
     @timer_func
     def to_lm_spin(self, input_map_plus, input_map_minus, spin, lmax=None):
         """Convert (+-s)A from map-space to harmonic-space, weighting by (+-s)Y_{lm}. Our convention definitions follow HEALPix.
@@ -332,7 +355,7 @@ class PolySpec():
             initial_lm = healpy.synalm([Cl_input['TT'], Cl_input['TE'], Cl_input['TB'], Cl_input['EE'], Cl_input['EB'], Cl_input['BB']], self.lmax, new=False)
         else:
             initial_lm = healpy.synalm([Cl_input['TT']], self.lmax, new=False)
-        initial_lm = initial_lm[:,healpy.Alm.getlm(self.lmax)[0]<=lmax]
+        initial_lm = np.asarray(initial_lm[:,healpy.Alm.getlm(self.lmax)[0]<=lmax], order='C')
         
         if not add_B:
             if deconvolve_beam:
@@ -357,16 +380,16 @@ class PolySpec():
                 # Find entries without any pathologies (i.e. avoiding ell=0,1)
                 good_l = np.linalg.det(Cl_mat)>0
                 inv_Cl_mat = np.zeros((3,3,len(ls)), dtype=np.float64, order='C')
-                inv_Cl_mat[:,:,good_l] = np.moveaxis(np.linalg.inv(Cl_mat[good_l]), [2,1,0], [0,1,2])
-            
+                inv_Cl_mat[:,:,good_l] = np.moveaxis(np.linalg.inv(Cl_mat[good_l]), [0,1,2], [2,1,0])
+
             else:
                 # Find entries without any pathologies (i.e. avoiding ell=0,1)
                 good_l = Cl_input['TT']>0
-                inv_Cl_mat = np.zeros((len(ls)), dtype=np.float64, order='C')
-                inv_Cl_mat[good_l] = 1./Cl_input['TT'][good_l]
-            
+                inv_Cl_mat = np.zeros((1,1,len(ls)), dtype=np.float64, order='C')
+                inv_Cl_mat[:,:,good_l] = 1./Cl_input['TT'][None,None,good_l]
+
             # Cast to all ell
-            inv_Cl_lm_mat = np.asarray(self.inv_Cl_tot_mat[:,:,self.l_arr], order='C')
+            inv_Cl_lm_mat = np.asarray(inv_Cl_mat[:,:,self.l_arr], order='C')
         
         # Compute gradient map
         Cinv_lm = np.einsum('ijk,jk->ik',self.inv_Cl_tot_lm_mat,initial_lm,order='C')

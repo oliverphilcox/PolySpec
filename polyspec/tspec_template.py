@@ -99,7 +99,7 @@ class TSpecTemplate():
                 Lmin_lens = L_edges_lens[0]
                 Lmax_lens = L_edges_lens[-1]-1
                 self.L_edges_lens = L_edges_lens
-            if Lmin_lens==None:
+            elif Lmin_lens==None:
                 if np.any(['gNL' in t for t in self.templates]):
                     self.Lmin_lens = 1
                 elif np.any(['tauNL' in t for t in self.templates]) :
@@ -164,7 +164,7 @@ class TSpecTemplate():
         self._configure_templates(templates, C_phi, C_Tphi, C_Tphi_eff, C_lens_weight)
     
         # Check mask properties
-        if not type(mask)==float or type(mask)==int:
+        if not (type(mask)==float or type(mask)==int):
             if len(mask)==1 or len(mask)==3:
                 assert len(mask[0])==self.base.Npix, f'Mask has incorrect shape: {mask.shape}'
             else:
@@ -234,7 +234,7 @@ class TSpecTemplate():
         
         if len(rtau_values)==0 and self.ints_2d:
             print("# No input r/tau sampling points supplied; these can be computed with the optimize_radial_sampling_2d() function\n")
-            self.N_rtau = 0. 
+            self.N_rtau = 0 
         elif self.ints_2d:
             print("Reading in precomputed r/tau integration points")
           
@@ -245,7 +245,7 @@ class TSpecTemplate():
             self.N_rtau = len(self.rtau_arr)
 
             # Check bounds
-            assert max(self.rtau_arr[:,0])>=0, "r should be in range (0, inf)"
+            assert min(self.rtau_arr[:,0])>0, "r should be in range (0, inf)"
             assert max(self.rtau_arr[:,1])<=0, "tau should be in range (-inf, 0)"
 
             self.rtau_weights = rtau_weights
@@ -324,6 +324,7 @@ class TSpecTemplate():
             assert len(C_phi)>=self.Lmax_lens+1, "Must specify C^phi-phi(L) up to at least Lmax."
             if not self.pol:
                 assert 'TT' in C_lens_weight.keys(), "Must specify unlensed TT power spectrum!"
+                assert len(C_lens_weight['TT'])>=self.lmax+1, "Must specify C_lens_weight['TT'](l) up to at least lmax."
             else:
                 assert 'TE' in C_lens_weight.keys(), "Must specify unlensed TE power spectrum!"
                 assert 'EE' in C_lens_weight.keys(), "Must specify unlensed EE power spectrum!"
@@ -1023,7 +1024,8 @@ class TSpecTemplate():
             
         # Return output
         return V
-    
+
+    @_timer_func('map_transforms')
     def _compute_isw_V_map(self, h_lm_filt, eff=False):
         """
         Compute ISW-lensing V map from a given data vector. These are used in the trispectrum numerators. 
@@ -2199,7 +2201,7 @@ class TSpecTemplate():
                     a_lm = self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic', deconvolve_beam=True)
                     self.timers['fish_grfs'] += time.time()-t_init
                     t_init = time.time()
-                    Uinv_a_lms.append(np.asarray(self.base.applyAinv(a_lm, input_type='harmonic')[:,self.lfilt],order='C'))
+                    Uinv_a_lms.append(np.asarray(self.base.applyAinv(a_lm, input_type='harmonic', lmax=self.lmax)[:,self.lminfilt],order='C'))
                     self.timers['Ainv'] += time.time()-t_init
                 all_Uinv_lms.append(Uinv_a_lms)
                 
@@ -2420,48 +2422,48 @@ class TSpecTemplate():
         
         if verb: print("# Assembling trispectrum numerator (4-field term)")
         for ii,t in enumerate(self.templates):
-            
+
             if t=='gNL-loc':
                 # gNL local template
                 if verb: print("Computing gNL-loc template")
-                
+
                 t_init = time.time()
                 t4_num[ii] = 9./100.*self.utils.gnl_loc_sum(self.r_weights[t], proc_maps['p00'], proc_maps['q'])*4.*self.base.A_pix*(4.*np.pi)**(1.5)
                 self.timers['gNL_summation'] += time.time()-t_init
 
-            if t=='gNL-con':
+            elif t=='gNL-con':
                 # gNL constant template
                 if verb: print("Computing gNL-con template")
-                
+
                 t_init = time.time()
                 t4_num[ii] = 9./25.*self.utils.gnl_con_sum(self.r_weights[t], proc_maps['r'])*self.base.A_pix
                 self.timers['gNL_summation'] += time.time()-t_init
 
-            if t=='gNL-dotdot':
+            elif t=='gNL-dotdot':
                 # gNL-dot{pi}^4 EFTI shape
                 if verb: print("Computing gNL-dotdot template")
-                
+
                 t_init = time.time()
                 t4_num[ii] = 384./25.*self.utils.gnl_dotdot_sum(self.rtau_weights[t], self.rtau_arr[:,1], proc_maps['a'])*self.base.A_pix
                 self.timers['gNL_summation'] += time.time()-t_init
 
-            if t=='gNL-dotdel':
+            elif t=='gNL-dotdel':
                 # gNL-dot{pi}^2del{pi}^2 EFTI shape
                 if verb: print("Computing gNL-dotdel template")
-                
+
                 t_init = time.time()
                 t4_num[ii] = 288./325.*self.utils.gnl_dotdel_sum(self.rtau_weights[t], self.rtau_arr[:,1], proc_maps['a'], proc_maps['b'], proc_maps['c'])*12*self.base.A_pix
                 self.timers['gNL_summation'] += time.time()-t_init
 
-            if t=='gNL-deldel':
+            elif t=='gNL-deldel':
                 # gNL-del{pi}^4 EFTI shape
                 if verb: print("Computing gNL-deldel template")
-                
+
                 t_init = time.time()
                 t4_num[ii] = 1728./2575.*self.utils.gnl_deldel_sum(self.rtau_weights[t],proc_maps['b'],proc_maps['c'])*6*self.base.A_pix
                 self.timers['gNL_summation'] += time.time()-t_init
 
-            if t=='tauNL-loc':
+            elif t=='tauNL-loc':
                 # tauNL-loc template
                 if verb: print("Computing tauNL-loc template")
 
@@ -2472,26 +2474,26 @@ class TSpecTemplate():
                 # Compute 4-field term (adding factors of Sqrt[4pi] to correct for Y_00 factors]
                 t4_num[ii] = 1./24.*self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], 0, 0, 0)*12.*(4.*np.pi)**(3./2.)
                 
-            if 'tauNL-direc' in t:
+            elif 'tauNL-direc' in t:
                 # Direction-dependent tauNL
                 n1,n3,n = np.asarray(t.split(':')[1].split(',')).astype(int)
                 if verb: print("Computing tauNL-direc(%d,%d,%d) template"%(n1,n3,n))
-                
+
                 ## Compute 4-field term
                 # Compute A maps (unless already computed)
                 if n1 not in A_maps_dd.keys():
                     A_maps_dd[n1] = self._A_maps(proc_maps, proc_maps, n1)
                 if n3 not in A_maps_dd.keys():
                     A_maps_dd[n3] = self._A_maps(proc_maps, proc_maps, n3)
-                
+
                 # Compute tau from these maps
                 t4_num[ii] = self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], n1, n3, n)/48.*24.
-                
-            if 'tauNL-even' in t:
+
+            elif 'tauNL-even' in t:
                 # Direction-dependent tauNL (parity-even)
                 n = int(t.split(':')[1])
                 if verb: print("Computing tauNL-even(%d) template"%n)
-                
+
                 if n not in A_maps_dd.keys():
                     A_maps_dd[n] = self._A_maps(proc_maps, proc_maps, n)
                 if 0 not in A_maps_dd.keys():
@@ -2502,52 +2504,52 @@ class TSpecTemplate():
                 else:
                     tau = self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], n, n, 0)
                     tau += 2*self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], 0, n, n)
-                
+
                 t4_num[ii] = 1./48.*tau*pref*8.
                 
-            if 'tauNL-odd' in t:
+            elif 'tauNL-odd' in t:
                 # Direction-dependent tauNL (parity-odd)
                 n = int(t.split(':')[1])
                 n1n3ns, weights = self._decompose_tauNL_odd(n)
                 if verb: print("Computing tauNL-odd(%d) template"%n)
-                
+
                 # Iterate over n1,n3,n combinations
                 tau = 0.
                 for ind in range(len(n1n3ns)):
                     n1, n3, n = n1n3ns[ind]
-                    
+
                     # Compute relevant A maps
                     if n1 not in A_maps_dd.keys():
                         A_maps_dd[n1] = self._A_maps(proc_maps, proc_maps, n1)
                     if n3 not in A_maps_dd.keys():
                         A_maps_dd[n3] = self._A_maps(proc_maps, proc_maps, n3)
-                
+
                     # Compute sum of A pairs
                     tau += weights[ind]*self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], n1, n3, n)
-                
+
                 # Assemble 4-field term
                 t4_num[ii] = 1./48.*tau*24.
-                
-            if 'tauNL-light' in t:
+
+            elif 'tauNL-light' in t:
                 # Light particle collider tauNL
                 s = int(t.split(':')[1].split(',')[0])
                 nu_s = float(t.split(':')[1].split(',')[1])
                 if verb: print("Computing tauNL-light(%d,%.2f) template"%(s,nu_s))
-                
+
                 # Compute A maps (unless already computed)
                 coll_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5+nu_s,0)
                 if coll_str not in A_maps_dd.keys():
                     A_maps_dd[coll_str] = self._A_maps(proc_maps, proc_maps, s, beta=-1.5+nu_s)
-                
+
                 # Compute 4-field term (internally taking real part)
                 t4_num[ii] = self._tau_sum_collider(A_maps_dd, A_maps_dd, self.r_weights[t], s, -1.5+nu_s)/24.*12.
-                
-            if 'tauNL-heavy' in t:
+
+            elif 'tauNL-heavy' in t:
                 # Heavy particle collider tauNL
                 s = int(t.split(':')[1].split(',')[0])
                 mu_s = float(t.split(':')[1].split(',')[1])
                 if verb: print("Computing tauNL-heavy(%d,%.2f) template"%(s,mu_s))
-                
+
                 # Compute A maps (unless already computed)
                 pos_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5,-1.0*mu_s)
                 neg_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5,+1.0*mu_s)
@@ -2555,11 +2557,11 @@ class TSpecTemplate():
                     A_maps_dd[pos_str] = self._A_maps(proc_maps, proc_maps, s, False, beta=-1.5-1.0j*mu_s)
                 if neg_str not in A_maps_dd.keys():
                     A_maps_dd[neg_str] = self._A_maps(proc_maps, proc_maps, s, False, beta=-1.5+1.0j*mu_s)
-                
+
                 # Compute 4-field term (internally taking real part)
                 t4_num[ii] = self._tau_sum_collider(A_maps_dd, A_maps_dd, self.r_weights[t], s, -1.5-1.0j*mu_s)/24.*12.
-                
-            if t=='lensing':
+
+            elif t=='lensing':
                 # Lensing template
                 if verb: print("Computing lensing template")
 
@@ -2570,8 +2572,8 @@ class TSpecTemplate():
                 t_init = time.time()
                 t4_num[ii] = 1./24.*np.sum(Ls*(Ls+1.)*Phi_dd*Phi_dd.conjugate()*(1.+(Ms>0))*self.C_phi[Ls]).real*12.
                 self.timers['lensing_summation'] += time.time()-t_init
-               
-            if t=='isw-lensing':
+
+            elif t=='isw-lensing':
                 # ISW-Lensing template
                 if verb: print("Computing ISW-lensing template")
 
@@ -2597,8 +2599,8 @@ class TSpecTemplate():
                 assert not self.pol
                 t4_num[ii] += lensing_isw_sum_sym(proc_maps['u'], proc_maps['v-isw'], proc_maps['s-isw'], self.base.nthreads)/4.*self.base.A_pix
                 self.timers['lensing_summation'] += time.time()-t_init
-                
-            if t=='point-source':
+
+            elif t=='point-source':
                 # Point-source template
                 t_init = time.time()
                 if verb: print("Computing point-source template")
@@ -2648,12 +2650,12 @@ class TSpecTemplate():
                             t0_num[ii] += 54./100.*summ/self.N_it*self.base.A_pix*(4.*np.pi)**(1.5)
                         self.timers['gNL_summation'] += time.time()-t_init
 
-                    if t=='gNL-con':
+                    elif t=='gNL-con':
                         t_init = time.time()
-                        
+
                         def _return_perm(map12, map34):
                             return self.utils.gnl_con_disc_sum(self.r_weights[t], map12['r'], map34['r'])
-                        
+
                         # First set of fields
                         summ = _return_perm(proc_maps, this_proc_a_maps)
                         # Second set of fields
@@ -2665,7 +2667,7 @@ class TSpecTemplate():
                             t0_num[ii] += 27./25.*summ/self.N_it*self.base.A_pix
                         self.timers['gNL_summation'] += time.time()-t_init
 
-                    if t=='gNL-dotdot':
+                    elif t=='gNL-dotdot':
                         t_init = time.time()
                         
                         def _return_perm(map12,map34):
@@ -2682,12 +2684,12 @@ class TSpecTemplate():
                             t0_num[ii] += 1152./25.*summ/self.N_it*self.base.A_pix
                         self.timers['gNL_summation'] += time.time()-t_init
 
-                    if t=='gNL-dotdel':
+                    elif t=='gNL-dotdel':
                         t_init = time.time()
-                        
+
                         def _return_perm(map1,map2,map3,map4):
                             return self.utils.gnl_dotdel_disc_sum(self.rtau_weights[t], self.rtau_arr[:,1], map1['a'],map2['a'],map3['b'],map4['b'],map3['c'],map4['c'])
-                        
+
                         # First set of fields
                         summ  = 2*_return_perm(this_proc_a_maps,this_proc_a_maps,proc_maps,proc_maps)
                         summ += 8*_return_perm(this_proc_a_maps,proc_maps,this_proc_a_maps,proc_maps)
@@ -2704,8 +2706,8 @@ class TSpecTemplate():
                             summ += 2*_return_perm(this_proc_b_maps,this_proc_b_maps,this_proc_a_maps,this_proc_a_maps)
                             t0_num[ii] += 864./325.*summ/self.N_it*self.base.A_pix
                         self.timers['gNL_summation'] += time.time()-t_init
-                        
-                    if t=='gNL-deldel':
+
+                    elif t=='gNL-deldel':
                         t_init = time.time()
                         
                         ## Sum over 4 permutations
@@ -2728,7 +2730,7 @@ class TSpecTemplate():
                             t0_num[ii] += 5184./2575.*summ/self.N_it*self.base.A_pix
                         self.timers['gNL_summation'] += time.time()-t_init
 
-                    if t=='tauNL-loc':
+                    elif t=='tauNL-loc':
                         
                         # First set of fields
                         if 0 not in A_maps_aa.keys():
@@ -2960,8 +2962,8 @@ class TSpecTemplate():
                             
                             # Integrate over r, r'
                             t0_num[ii] += 1./24.*tau*3/self.N_it*2. # x2 from dropped perms
-                        
-                    if t=='lensing':
+
+                    elif t=='lensing':
                         # Lensing template
                         Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
                         Ms = self.base.m_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
@@ -2991,8 +2993,8 @@ class TSpecTemplate():
                             t0_num[ii] += 1./24.*np.sum(Ls*(Ls+1.)*Phi_sum*(1.+(Ms>0))*self.C_phi[Ls]).real*3./self.N_it
                             self.timers['lensing_summation'] += time.time()-t_init
                         del Phi_sum
-                     
-                    if t=='isw-lensing':
+
+                    elif t=='isw-lensing':
                         # ISW-Lensing template
                         Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
                         Ms = self.base.m_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
@@ -3058,8 +3060,8 @@ class TSpecTemplate():
                             t0_num[ii] += contact_sum*self.base.A_pix/8./self.N_it
                             self.timers['lensing_summation'] += time.time()-t_init
                         del Phi_sum, contact_sum
-                    
-                    if t=='point-source':
+
+                    elif t=='point-source':
                         t_init = time.time()
                         
                         def _return_perm(map12, map34):
@@ -3256,7 +3258,8 @@ class TSpecTemplate():
 
         # Check precision parameters
         assert reduce_r>0, "reduce_r parameter must be positive"
-        
+        assert 0<tolerance<1, "tolerance must be between 0 and 1 (representing acceptable Fisher error fraction)"
+
         if reduce_r<0.5:
             print("## Caution: very dense r-sampling requested; computation may be very slow") 
         if reduce_r>3:
@@ -3936,6 +3939,9 @@ class TSpecTemplate():
                 # Update indices
                 next_ind = inds_init[notinds][np.argmax(np.sum(G_mat,axis=1)**2/np.diag(G_mat))]
                 inds.append(next_ind)
+            else:
+                # Loop completed without break - optimization exhausted all points
+                w_opt = w_vals.copy()
 
             # Check final Fisher matrix
             score, fish = _compute_score(w_opt, init_score, full_score=True)
@@ -4096,7 +4102,7 @@ class TSpecTemplate():
             for ii,t in enumerate(self.templates):
                 
                 if t=='gNL-loc':
-                    
+
                     if verb: print("Computing Q-derivative for gNL-loc")
                     P0_maps = P_maps[0][:,0]*np.sqrt(4.*np.pi)
                     
@@ -4124,7 +4130,7 @@ class TSpecTemplate():
                     Qs[3,ii] += 54./25.*self._transform_maps(self.utils.multiply(P0_maps[0],P0_maps[1],P0_maps[1]),
                                                              self.qlXs,self.r_weights[t])
 
-                if t=='gNL-con':
+                elif t=='gNL-con':
                     if verb: print("Computing Q-derivative for gNL-con")
                     
                     # Compute all fields 
@@ -4136,8 +4142,8 @@ class TSpecTemplate():
                                                               self.rlXs,self.r_weights[t])
                     Qs[3,ii]  = 216./25.*self._transform_maps(self.utils.multiply(R_maps[0],R_maps[1],R_maps[1]),
                                                               self.rlXs,self.r_weights[t])
-                
-                if t=='gNL-dotdot':
+
+                elif t=='gNL-dotdot':
                     if verb: print("Computing Q-derivative for gNL-dotdot")
                     
                     # Compute all fields 
@@ -4149,8 +4155,8 @@ class TSpecTemplate():
                                                                self.alXs*self.rtau_arr[:,1][None,None,:]**4,self.rtau_weights[t])
                     Qs[3,ii]  = 9216./25.*self._transform_maps(self.utils.multiply(A_maps[0],A_maps[1],A_maps[1]),
                                                                self.alXs*self.rtau_arr[:,1][None,None,:]**4,self.rtau_weights[t])
-                
-                if t=='gNL-dotdel':
+
+                elif t=='gNL-dotdel':
                     if verb: print("Computing Q-derivative for gNL-dotdel")
                     
                     # 111 
@@ -4184,8 +4190,8 @@ class TSpecTemplate():
                                                                    self.blXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
                     Qs[3,ii] += 13824./325.*self._transform_maps(self.utils.multiplyC_asym(A_maps[1],A_maps[0],C_maps[1],C_maps[0]),
                                                                    self.clXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t],spin=1)
-                    
-                if t=='gNL-deldel':
+
+                elif t=='gNL-deldel':
                     if verb: print("Computing Q-derivative for gNL-deldel")
                     
                     # Precompute useful quantities
@@ -4224,8 +4230,8 @@ class TSpecTemplate():
                                                                    self.blXs,self.rtau_weights[t])
                     Qs[3,ii] += 165888./2575.*self._transform_maps(self.utils.multiply2C(C_maps[1],quad_12),
                                                                    self.clXs,self.rtau_weights[t],spin=1)
-                    
-                if t=='tauNL-loc':
+
+                elif t=='tauNL-loc':
                     # Local tauNL
                     if verb: print("Computing Q-derivative for tauNL-loc")
                     
@@ -4295,8 +4301,8 @@ class TSpecTemplate():
                     
                     # Add to output array (only one conjugate needed here!)
                     _add_to_Q_coll(-1.5-1.0j*mu_s,s)
-                    
-                if t=='lensing':
+
+                elif t=='lensing':
                     # Lensing A_lens estimator
                     fields1 = {'u':U_maps[0],'v':V_maps[0]}
                     fields2 = {'u':U_maps[1],'v':V_maps[1]}
@@ -4398,8 +4404,8 @@ class TSpecTemplate():
                     Qs[3,ii] += 4*_get_Q(fields1, W_22)
                     
                     del fields1, fields2, W_11, W_22, W_12sym
-                
-                if t=='isw-lensing':
+
+                elif t=='isw-lensing':
                     # Lensing A_lens estimator
                     fields1 = {'u':U_maps[0],'v-isw':V_isw_maps[0],'v':V_maps[0],'s-isw':S_isw_maps[0]}
                     fields2 = {'u':U_maps[1],'v-isw':V_isw_maps[1],'v':V_maps[1],'s-isw':S_isw_maps[1]}
@@ -4551,13 +4557,13 @@ class TSpecTemplate():
                         # Third term, spin(+-1)
                         if sym_type=='111':
                             input_map = 3*fields1['u'][0]*(-fields1['s-isw'][0]*fields1['v-isw'][0].conjugate()+fields1['s-isw'][1]*fields1['v-isw'][0])
-                        if sym_type=='222':
+                        elif sym_type=='222':
                             input_map = 3*fields2['u'][0]*(-fields2['s-isw'][0]*fields2['v-isw'][0].conjugate()+fields2['s-isw'][1]*fields2['v-isw'][0])
-                        if sym_type=='112':
+                        elif sym_type=='112':
                             input_map  = fields1['u'][0]*(-fields1['s-isw'][0]*fields2['v-isw'][0].conjugate()+fields1['s-isw'][1]*fields2['v-isw'][0])
                             input_map += fields1['u'][0]*(-fields2['s-isw'][0]*fields1['v-isw'][0].conjugate()+fields2['s-isw'][1]*fields1['v-isw'][0])
                             input_map += fields2['u'][0]*(-fields1['s-isw'][0]*fields1['v-isw'][0].conjugate()+fields1['s-isw'][1]*fields1['v-isw'][0])
-                        if sym_type=='122':
+                        elif sym_type=='122':
                             input_map  = fields1['u'][0]*(-fields2['s-isw'][0]*fields2['v-isw'][0].conjugate()+fields2['s-isw'][1]*fields2['v-isw'][0])
                             input_map += fields2['u'][0]*(-fields1['s-isw'][0]*fields2['v-isw'][0].conjugate()+fields1['s-isw'][1]*fields2['v-isw'][0])
                             input_map += fields2['u'][0]*(-fields2['s-isw'][0]*fields1['v-isw'][0].conjugate()+fields2['s-isw'][1]*fields1['v-isw'][0])
@@ -4585,8 +4591,8 @@ class TSpecTemplate():
                     Qs[3,ii] += 4*_get_Q_contact('122')
                     
                     del fields1, fields2, W_11, W_22, W_12sym
-                    
-                if t=='point-source':
+
+                elif t=='point-source':
                     if verb: print("Computing Q-derivative for point sources")
                     
                     def point_source_Q(product_map):

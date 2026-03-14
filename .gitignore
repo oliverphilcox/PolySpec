@@ -1,13 +1,26 @@
+# Cython-generated C/C++ files
 polyspec/cython/tauNL_utils.c
 polyspec/cython/tauNL_utils.cpp
 polyspec/cython/k_integrals.c
 polyspec/cython/k_integrals.cpp
 polyspec/cython/ideal_fisher.c
 polyspec/cython/ideal_fisher.cpp
+polyspec/cython/fNL_utils.cpp
+polyspec/cython/binned_utils.c
+polyspec/cython/test_utils.c
+
+# Compiled extensions and build artifacts
 polyspec/cython/*.so
-polyspec/cython/build
-polyspec/cython/build/*
-.ipynb_checkpoints
-.ipynb_checkpoints/*
+polyspec/cython/build/
+polyspec/cython/dist/
+polyspec/cython/*.egg-info/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Scripts (user-specific)
 scripts/
-scripts/*

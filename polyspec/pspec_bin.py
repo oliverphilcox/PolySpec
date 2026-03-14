@@ -17,7 +17,7 @@ class PSpecBin():
     - l_bins: array of bin edges
     - fields: which T/E/B power spectra to compute
     """
-    def __init__(self, base, mask, applySinv, l_bins, fields=['TT','TE','TB','EE','EB','EE']):
+    def __init__(self, base, mask, applySinv, l_bins, fields=['TT','TE','TB','EE','EB','BB']):
         # Read in attributes
         self.base = base
         self.mask = mask
