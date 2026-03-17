@@ -101,3 +101,4 @@ To use the code, a number of Cython modules must be installed. This can be done 
 8. Philcox, O. H. E., Shiraishi, M., "Testing graviton parity and Gaussianity with Planck T-, E-, and B-mode bispectra", (2024) ([arXiv](https://arxiv.org/abs/2312.12498))
 9. Philcox, O. H. E., Shiraishi, M., "Non-Gaussianity Beyond the Scalar Sector: A Search for Tensor and Mixed Tensor-Scalar Bispectra with Planck Data", (2024) ([arXiv](https://arxiv.org/abs/2409.10595))
 10. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 3. Constraints from Planck", (2025) ([arXiv](https://arxiv.org/abs/2502.06931))
+11. Philcox, O. H. E., Pimentel, G. L., Yang, C., "Searching for Unparticles with the Cosmic Microwave Background", (2026) ([arXiv](https://arxiv.org/abs/2603.13486))
