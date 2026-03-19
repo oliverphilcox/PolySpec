@@ -94,11 +94,12 @@ To use the code, a number of Cython modules must be installed. This can be done 
 3. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 1. Primordial Theory & Optimal Estimators", (2025) ([arXiv](https://arxiv.org/abs/2502.04434))
 4. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 2. Code & Validation", (2025) ([arXiv](http://arxiv.org/abs/2502.05258))
 5. Philcox, O. H., E., Hill, J., C., "The ISW-Lensing Bispectrum & Trispectrum", (2025) ([arXiv](https://arxiv.org/abs/2504.03826))
+6. Philcox, O. H. E., "What Shape is the Inflationary Bispectrum?", (2026) ([arXiv](https://arxiv.org/abs/2603.17004))
 
 ### Applications
-6. Philcox, O. H. E., "Do the CMB Temperature Fluctuations Conserve Parity?", (2023) ([arXiv](https://arxiv.org/abs/2303.12106))
-7. Philcox, O. H. E., Shiraishi, M., "Testing Parity Symmetry with the Polarized Cosmic Microwave Background", (2023) ([arXiv](https://arxiv.org/abs/2308.03831))
-8. Philcox, O. H. E., Shiraishi, M., "Testing graviton parity and Gaussianity with Planck T-, E-, and B-mode bispectra", (2024) ([arXiv](https://arxiv.org/abs/2312.12498))
-9. Philcox, O. H. E., Shiraishi, M., "Non-Gaussianity Beyond the Scalar Sector: A Search for Tensor and Mixed Tensor-Scalar Bispectra with Planck Data", (2024) ([arXiv](https://arxiv.org/abs/2409.10595))
-10. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 3. Constraints from Planck", (2025) ([arXiv](https://arxiv.org/abs/2502.06931))
-11. Philcox, O. H. E., Pimentel, G. L., Yang, C., "Searching for Unparticles with the Cosmic Microwave Background", (2026) ([arXiv](https://arxiv.org/abs/2603.13486))
+7. Philcox, O. H. E., "Do the CMB Temperature Fluctuations Conserve Parity?", (2023) ([arXiv](https://arxiv.org/abs/2303.12106))
+8. Philcox, O. H. E., Shiraishi, M., "Testing Parity Symmetry with the Polarized Cosmic Microwave Background", (2023) ([arXiv](https://arxiv.org/abs/2308.03831))
+9. Philcox, O. H. E., Shiraishi, M., "Testing graviton parity and Gaussianity with Planck T-, E-, and B-mode bispectra", (2024) ([arXiv](https://arxiv.org/abs/2312.12498))
+10. Philcox, O. H. E., Shiraishi, M., "Non-Gaussianity Beyond the Scalar Sector: A Search for Tensor and Mixed Tensor-Scalar Bispectra with Planck Data", (2024) ([arXiv](https://arxiv.org/abs/2409.10595))
+11. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 3. Constraints from Planck", (2025) ([arXiv](https://arxiv.org/abs/2502.06931))
+12. Philcox, O. H. E., Pimentel, G. L., Yang, C., "Searching for Unparticles with the Cosmic Microwave Background", (2026) ([arXiv](https://arxiv.org/abs/2603.13486))
