@@ -28,8 +28,9 @@ class BSpecTemplate():
     - neural_inputs: Input set of neural-network bispectrum templates (only used if "neural-0, neural-1, ..." is in templates). These must take the form ({weights_0, alpha_0, beta_0, [gamma_0]}, {weights_1, alpha_1, beta_1, [gamma_1]}, ...), where alpha/beta/gamma are functions of k and i, for i = 0 ... len(weights)-1. 
     - k_bin_edges: List of Fourier-bin edges for the binned estimator: (k_1, k_2, k_3, ...). If specified, "binned" should be in templates.
     - k_triplet_ids: List of {bin1, bin2, bin3, bin-id}. If specified, "binned" should be in templates.
+    - feat_params: Additional parameters for the feature templates.
     """
-    def __init__(self, base, mask, applySinv, templates, lmin, lmax,  k_arr=[], Tl_arr=[], r_arr=[], ns=0.96, As=2.1e-9, k_pivot=0.05, r_values = [], r_weights = {}, C_Tphi=[], C_Ephi=[], C_lens_weight = {}, r_star=None, r_hor=None, neural_inputs=None, k_bin_edges=None, k_triplet_ids=None):
+    def __init__(self, base, mask, applySinv, templates, lmin, lmax,  k_arr=[], Tl_arr=[], r_arr=[], ns=0.96, As=2.1e-9, k_pivot=0.05, r_values = [], r_weights = {}, C_Tphi=[], C_Ephi=[], C_lens_weight = {}, r_star=None, r_hor=None, neural_inputs=None, k_bin_edges=None, k_triplet_ids=None, feat_params=None):
         # Read in attributes
         self.base = base
         self.mask = mask
@@ -45,6 +46,7 @@ class BSpecTemplate():
         self.neural_inputs = neural_inputs
         self.k_bin_edges = k_bin_edges
         self.k_triplet_ids = k_triplet_ids
+        self.feat_params = feat_params
         
         # Create primordial power spectrum function
         print("Primordial Spectrum: n_s = %.2f, A_s = %.2e, k_pivot = %.2f"%(self.ns, self.As, self.k_pivot));
@@ -143,7 +145,7 @@ class BSpecTemplate():
         """Check input templates and log which quantities to compute."""
         
         # Check correct templates are being used and print them
-        self.all_templates_1d = ['fNL-loc','fNL-eq','fNL-orth','fNL-orth2','binned']
+        self.all_templates_1d = ['fNL-loc','fNL-eq','fNL-orth','fNL-orth2','fNL-feat-sharp','fNL-feat-res','binned']
         self.all_templates = self.all_templates_1d+['isw-lensing']
         ii = 0
         neural_inds = []
@@ -191,6 +193,30 @@ class BSpecTemplate():
         if 'fNL-orth2' in templates:
             self.to_compute.append(['f_m2','f_m1','f_p0','f_p1','f_p2','f_p3','f_p4'])
             self.ints_1d = True
+
+        if 'fNL-feat-sharp' in templates:
+            print("#TODO")
+            self.to_compute.append(['f_osc'])
+            self.ints_1d = True
+
+        if 'fNL-feat-res' in templates:
+            self.to_compute.append(['f_exp'])
+            self.ints_1d = True
+            assert 'kres_cs' in self.feat_params, "Must specify kres_cs to use resonant templates!"
+            assert 'u_arr' in self.feat_params, "Must specify u_arr to use resonant templates!"
+            assert 'omega' in self.feat_params, "Must specify omega to use resonant templates!"
+            self.u_arr = self.feat_params['u_arr']
+            self.N_u = len(self.u_arr)
+            self.omega = self.feat_params['omega']
+            
+            # Compute weight function, W_j(theta,u) = u^{i*omega-1}/Gamma(i*omega) * w_j(theta)
+            #TODO: implement w_j !=1
+            log_u = np.log(self.u_arr)
+            dlnu = np.zeros(self.N_u, dtype=np.float64)
+            dlnu[:-1] += 0.5*np.diff(log_u)
+            dlnu[1:] += 0.5*np.diff(log_u)
+            du = dlnu*self.u_arr
+            self.u_weights = np.asarray(du*self.u_arr**(1j*self.omega-1.)/gamma(1j*self.omega), dtype=np.complex128, order='C')
         
         if 'binned' in templates:
             # Check inputs
@@ -261,6 +287,7 @@ class BSpecTemplate():
                     self.neural_cyclic[n] = False
                     print("Neural-%d: Using an input with %d terms"%(n,self.neural_terms[n]))
             self.ints_1d = True
+       
         if 'isw-lensing' in templates:
             # Check inputs
             assert len(C_Tphi)>0, "Must supply temperature-lensing cross spectrum!"
@@ -375,6 +402,8 @@ class BSpecTemplate():
             if hasattr(self, 'flXs_p2'): delattr(self, 'flXs_p2')
             if hasattr(self, 'flXs_p3'): delattr(self, 'flXs_p3')
             if hasattr(self, 'flXs_p4'): delattr(self, 'flXs_p4')
+            if hasattr(self, 'flXs_osc'): delattr(self, 'flXs_osc')
+            if hasattr(self, 'flXs_exp'): delattr(self, 'flXs_exp')
             if hasattr(self, 'flXs_bin'): delattr(self, 'flXs_bin')
             if hasattr(self, 'alpha_lXs'): delattr(self, 'alpha_lXs')
             if hasattr(self, 'beta_lXs'): delattr(self, 'beta_lXs')
@@ -396,7 +425,7 @@ class BSpecTemplate():
         print("Interpolating Bessel functions")
         if ints_1d:
             jlkr = interpolate_jlkr(x_arr, self.k_arr, self.r_arr, jlxs, self.base.nthreads)
-
+        
         # Set up arrays
         Pzeta_arr = self.Pzeta(self.k_arr)
         
@@ -449,6 +478,15 @@ class BSpecTemplate():
             self.flXs_p4 = np.zeros((self.lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
             p_integral_general(self.k_arr, Pzeta_arr, (2.-4.)/3, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_p4)
 
+        if 'f_exp' in self.to_compute and ints_1d:
+
+            # Compute integrals in Cython, on the decoupled (raw) 2D-template radial grid
+            print("Computing exponential f_l^X(r,u) integrals")
+            self.flXs_exp = np.zeros((self.lmax+1,1+2*self.pol,self.N_r,self.N_u),dtype=np.float64,order='C')
+            kpow = -2.0
+            #TODO: check amplitude dependence here!
+            q_integral_exp(self.k_arr, Pzeta_arr, self.u_arr, -kpow/3., self.feat_params['kres_cs'], self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_exp)
+        
         if 'f_bin' in self.to_compute and ints_1d:
             
             # Compute integrals in Cython
@@ -479,7 +517,7 @@ class BSpecTemplate():
         
         # Define Cython utility class
         self.utils = fNL_utils(self.base.nthreads, self.N_r, self.base.l_arr.astype(np.int32),self.base.m_arr.astype(np.int32),
-                                self.ls.astype(np.int32), self.ms.astype(np.int32))            
+                                self.ls.astype(np.int32), self.ms.astype(np.int32))
         
         print("Precomputation complete")
         
@@ -647,7 +685,10 @@ class BSpecTemplate():
             return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p3, radial_index) for imap in input_maps],order='C')     
 
         elif filtering=='F_p4':
-            return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p4, radial_index) for imap in input_maps],order='C')     
+            return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p4, radial_index) for imap in input_maps],order='C')    
+
+        elif filtering=='F_exp':
+            return np.asarray([self._compute_weighted_map_single(imap, self.flXs_exp, radial_index) for imap in input_maps],order='C')
 
         elif filtering=='F_bin':
             return np.asarray([self._compute_weighted_maps(imap, np.asarray(self.flXs_bin[:,:,radial_index,:], order='C')) for imap in input_maps],order='C')
@@ -706,6 +747,15 @@ class BSpecTemplate():
         if 'f_p4' in self.to_compute:
             output['f_p4'] = self._compute_weighted_maps(input_map, self.flXs_p4)
 
+        # Compute feature maps
+        if 'f_osc' in self.to_compute:
+            output['f_osc'] = self._compute_weighted_maps(input_map, self.flXs_osc)
+            
+        if 'f_exp' in self.to_compute:
+            # Flatten (r,u) to one dimension for the SHT, then restore the two axes
+            flXs_exp_flat = np.asarray(self.flXs_exp.reshape(self.flXs_exp.shape[0], self.flXs_exp.shape[1], -1), order='C')
+            output['f_exp'] = self._compute_weighted_maps(input_map, flXs_exp_flat).reshape(self.N_r, self.N_u, self.base.Npix)
+            
         # Compute binned maps
         if 'f_bin' in self.to_compute:
             # Flatten all bins to one dimension
@@ -1043,6 +1093,17 @@ class BSpecTemplate():
                 index += 1
                 self.timers['fNL_summation'] += time.time()-t_init
 
+            elif t=='fNL-feat-res':
+                # fNL-eq template
+                print("Computing fNL-feat-res template")
+
+                t_init = time.time()
+                summ = self.utils.fnl_sum_2d_complex(self.r_weights[t], self.u_weights, proc_maps['f_exp'], proc_maps['f_exp'], proc_maps['f_exp'])
+                b3_num[index] = 1./3.*summ.real*self.base.A_pix
+                index += 1
+                #TODO: add b1_num
+                self.timers['fNL_summation'] += time.time()-t_init
+            
             elif 'neural' in t:
                 # Neural-network input template
                 n = int(t.split('-')[1])
@@ -1254,7 +1315,7 @@ class BSpecTemplate():
         r_init = 0.5*(r_raw[1:]+r_raw[:-1])
         self.quad_weights_1d = r_init**2*np.diff(r_raw)
         r_weights = {}
-        
+
         # Partition the radial indices if required or read in precomputed points
         if initial_r_points is not None:
             assert split_index is None, "Cannot specify both initial_r_points and index_split"
@@ -1410,9 +1471,9 @@ class BSpecTemplate():
         self.r_weights = {}
         for template in ordered_templates:
             # add weights, padding with zeros
-            self.r_weights[template] = np.zeros(len(w_opt)) 
+            self.r_weights[template] = np.zeros(len(w_opt))
             self.r_weights[template][:len(r_weights[template])] = r_weights[template]
-        
+
         # Precompute k-space integrals with new radial integration
         if verb: print("Computing k integrals with optimized radial grid")
         self._prepare_templates(ints_1d=True)

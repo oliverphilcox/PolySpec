@@ -129,6 +129,30 @@ cdef class fNL_utils:
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.cdivision(True)
+    cpdef double complex fnl_sum_2d_complex(self, double[:] r_weights, double complex[:] u_weights, double[:,:,::1] A_maps, double[:,:,::1] B_maps, double[:,:,::1] C_maps):
+        """Compute Sum_ir w_ir Sum_iu w_iu(complex) A(r,u)B(r,u)C(r,u) for real maps A, B, C with a
+        complex u-weighting."""
+        cdef int ir, iu, ipix, nr = A_maps.shape[0], nu = A_maps.shape[1], npix = A_maps.shape[2]
+        cdef double tmp_sum2, tmp_sum_re, tmp_sum_im, u_re, u_im, out_re = 0., out_im = 0.
+
+        for ir in prange(nr, nogil=True, schedule='static', num_threads=self.nthreads):
+            tmp_sum_re = 0.
+            tmp_sum_im = 0.
+            for iu in xrange(nu):
+                u_re = u_weights[iu].real
+                u_im = u_weights[iu].imag
+                tmp_sum2 = 0.
+                for ipix in xrange(npix):
+                    tmp_sum2 = tmp_sum2 + A_maps[ir,iu,ipix]*B_maps[ir,iu,ipix]*C_maps[ir,iu,ipix]
+                tmp_sum_re = tmp_sum_re + u_re*tmp_sum2
+                tmp_sum_im = tmp_sum_im + u_im*tmp_sum2
+            out_re += r_weights[ir]*tmp_sum_re
+            out_im += r_weights[ir]*tmp_sum_im
+        return complex(out_re, out_im)
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.cdivision(True)
     cdef double _fnl_sum(self, double[:] r_weights, double[:,::1] A_maps, double[:,::1] B_maps, double[:,::1] C_maps) noexcept nogil:
         """Compute Sum_i w_i A_i(r)B_i(r)C_i(r) for maps A, B, C."""
         cdef int ir, ipix, nr = A_maps.shape[0], npix = A_maps.shape[1]
