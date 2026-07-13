@@ -1228,7 +1228,16 @@ class BSpecTemplate():
                         b1_num[index] += -3./5.*summ*self.base.A_pix/self.N_it
                         index += 1
                         self.timers['fNL_summation'] += time.time()-t_init
-                        
+
+                    elif t=='fNL-feat-res':
+                        t_init = time.time()
+
+                        #TODO: add asymmetric form
+                        summ = self.utils.fnl_sum_2d_complex(self.r_weights[t], self.u_weights, proc_maps['f_exp'], this_proc_maps['f_exp'], this_proc_maps['f_exp'])
+                        b1_num[index] += -summ.real*self.base.A_pix/self.N_it
+                        index += 1
+                        self.timers['fNL_summation'] += time.time()-t_init
+
                     elif 'neural' in t:
                         n = int(t.split('-')[1])
                         t_init = time.time()
