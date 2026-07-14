@@ -693,7 +693,7 @@ class BSpecTemplate():
             return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p4, radial_index) for imap in input_maps],order='C')    
 
         elif filtering=='F_exp':
-            return {kpow: np.asarray([[self._compute_weighted_map_single(imap, np.asarray(self.flXs_exp[kpow][:,:,:,iu],order='C'), radial_index) for iu in range(self.N_u)] for imap in input_maps],order='C') for kpow in self.feat_kpows}
+            return {kpow: np.asarray([self._compute_weighted_maps(imap, np.asarray(self.flXs_exp[kpow][:,:,radial_index,:],order='C'))[:,None,:] for imap in input_maps],order='C') for kpow in self.feat_kpows}
 
         elif filtering=='F_bin':
             return np.asarray([self._compute_weighted_maps(imap, np.asarray(self.flXs_bin[:,:,radial_index,:], order='C')) for imap in input_maps],order='C')
@@ -988,8 +988,20 @@ class BSpecTemplate():
 
             elif template=='fNL-feat-res':
                 if verb: print("\tComputing fNL-feat-res Fisher matrix derivative exactly")
-                #TODO: update to the exact 5-term B_res form (currently uses the old single-term k^{-2} ansatz)
-                deriv_matrix = np.asarray(fisher_deriv_fNL_feat_res(self.flXs_exp[-2], self.quad_weights_1d, self.u_weights, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
+                # Grouped into 3 leg-type multisets: M1={p3,p3,p3}, M2={p2,p2,p3}(+2perm), M3={p2,p2,p2}.
+                # VMa = 2*Re(prefactor * group u-weight); this correctly implements the full +c.c.+c.c.
+                # structure (each of the 4 terms {j,k},{j*,k},{j,k*},{j*,k*} collapses since Aj,Bj,Cj are
+                # real, giving [Wj+Wj*][Wk*+Wk] = 2Re(Wj)*2Re(Wk); verified numerically to machine precision).
+                omega = self.omega
+                kappa = self.feat_params['kres_cs']
+                prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
+                u_weights_m1 = self.u_weights/self.u_arr
+                u_weights_m3 = self.u_weights/self.u_arr**3*(1j*omega-2)
+                VM1 = np.asarray(2.*np.real(prefactor*u_weights_m3), order='C')
+                VM2 = np.asarray(2.*np.real(prefactor*3.*u_weights_m1), order='C')
+                VM3 = np.asarray(2.*np.real(prefactor*self.u_weights), order='C')
+                deriv_matrix = np.asarray(fisher_deriv_fNL_feat_res(self.flXs_exp[-2], self.flXs_exp[-3], self.quad_weights_1d, VM1, VM2, VM3,
+                                    np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                     legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
             
             elif 'neural' in template:
@@ -1765,14 +1777,30 @@ class BSpecTemplate():
 
                     elif t=='fNL-feat-res':
                         if (verb and radial_index==0): print("Computing Q-derivative for fNL-feat-res")
-                        #TODO: update to the exact 5-term B_res form (currently uses the old single-term k^{-2} ansatz)
+                        omega = self.omega
+                        kappa = self.feat_params['kres_cs']
+                        prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
+                        u_weights_m1 = self.u_weights/self.u_arr
+                        u_weights_m3 = self.u_weights/self.u_arr**3*(1j*omega-2)
+                        rw = self.r_weights[t][radial_index]
+                        VM1 = np.asarray(2.*np.real(prefactor*u_weights_m3)*rw, order='C')
+                        VM2 = np.asarray(2.*np.real(prefactor*u_weights_m1)*rw, order='C')
+                        VM3 = np.asarray(2.*np.real(prefactor*self.u_weights)*rw, order='C')
 
-                        # Iterate over both the 11 and 22 pieces
+                        filt_p2 = np.asarray(self.flXs_exp[-2][:,:,radial_index,:], order='C')
+                        filt_p3 = np.asarray(self.flXs_exp[-3][:,:,radial_index,:], order='C')
+
                         for index in [0,1]:
-                            for iu in range(self.N_u):
-                                prod_map = self.utils.multiply(Fexp_maps[-2][index,iu], Fexp_maps[-2][index,iu])
-                                filt = np.asarray(self.flXs_exp[-2][:,:,[radial_index],iu], order='C')
-                                Qs[index,q_index] += 2.*self.u_weights[iu].real*self._transform_maps(prod_map, filt, self.r_weights[t][[radial_index]])
+                            f2 = np.asarray(Fexp_maps[-2][index,:,0,:], order='C')
+                            f3 = np.asarray(Fexp_maps[-3][index,:,0,:], order='C')
+                            prod_p3p3 = self.utils.multiply(f3, f3)
+                            prod_p2p3 = self.utils.multiply(f2, f3)
+                            prod_p2p2 = self.utils.multiply(f2, f2)
+
+                            Qs[index,q_index] += self._transform_maps(prod_p3p3, filt_p3, VM1)
+                            Qs[index,q_index] += self._transform_maps(prod_p2p3, filt_p2, 2.*VM2)
+                            Qs[index,q_index] += self._transform_maps(prod_p2p2, filt_p3, VM2)
+                            Qs[index,q_index] += self._transform_maps(prod_p2p2, filt_p2, VM3)
                         q_index += 1
 
                     elif 'neural' in t:

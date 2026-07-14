@@ -860,22 +860,31 @@ cpdef double[:,::1] fisher_deriv_fNL_binned(double[:,:,::1] flXs, double[:] weig
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-cpdef double[:,::1] fisher_deriv_fNL_feat_res(double[:,:,:,::1] flXs, double[:] weights, double complex[:] u_weights, double[:,:,::1] inv_Cl_mat, double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
-    """Compute the exact Fisher matrix for the fNL^{feat-res} template, integrating explicitly over u, u' so the output is a pure function of (r, r')."""
+cpdef double[:,::1] fisher_deriv_fNL_feat_res(double[:,:,:,::1] flXs2, double[:,:,:,::1] flXs3, double[:] weights,
+                                                double[:] VM1, double[:] VM2, double[:] VM3,
+                                                double[:,:,::1] inv_Cl_mat, double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
+    """Compute the exact Fisher matrix for the fNL^{feat-res} template (exact 5-term B_res form, grouped into 3
+    leg-type multisets M1={p3,p3,p3}, M2={p2,p2,p3}(+2perm), M3={p2,p2,p2}), integrating explicitly over u, u'
+    so the output is a pure function of (r, r'). flXs2, flXs3 are the k^-2, k^-3 radial integrals; VM1, VM2, VM3
+    are the real 2*Re(prefactor * group u-weight) arrays for each multiset. This is the fully explicit (slow)
+    version: all 4 zeta types (p2-p2, p2-p3, p3-p2, p3-p3) and all 9 (Ma,Mb) group-pair terms are computed
+    directly with no shared helper function, to keep every term visible for review before any simplification."""
 
-    cdef int nl = lmax+1-lmin, nr = flXs.shape[2], nu = flXs.shape[3], npol = flXs.shape[1], nmu = len(w_mus)
-    cdef int il, ir, jr, iu, ju, ipol, jpol, tid
+    cdef int nl = lmax+1-lmin, nr = flXs2.shape[2], nu = flXs2.shape[3], npol = flXs2.shape[1], nmu = len(w_mus)
+    cdef int il, ir, jr, iu, ju, ipol, jpol, tid, imu
     cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
-    cdef double[:] u_weights_re = np.zeros(nu,dtype=np.float64)
     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
-    cdef double[:,:,:,::1] zeta_scratch = np.zeros((nthreads,nl,nu,nu),dtype=np.float64)
+    cdef double[:,:,:,::1] zeta22 = np.zeros((nthreads,nl,nu,nu),dtype=np.float64)
+    cdef double[:,:,:,::1] zeta23 = np.zeros((nthreads,nl,nu,nu),dtype=np.float64)
+    cdef double[:,:,:,::1] zeta32 = np.zeros((nthreads,nl,nu,nu),dtype=np.float64)
+    cdef double[:,:,:,::1] zeta33 = np.zeros((nthreads,nl,nu,nu),dtype=np.float64)
     cdef double pref = dpow(4.*M_PI,-1)/36.
-    cdef double acc, tmp
+    cdef double acc, tmp22, tmp23, tmp32, tmp33
+    cdef double s22, s23, s32, s33
+    cdef double m11, m12, m13, m21, m22, m23, m31, m32, m33
 
     for il in xrange(nl):
         twol_arr[il] = (2.*il+2*lmin+1.)
-    for iu in xrange(nu):
-        u_weights_re[iu] = 2.*u_weights[iu].real
 
     for ir in prange(nr, nogil=True, schedule='static', num_threads=nthreads):
         tid = threadid()
@@ -884,16 +893,58 @@ cpdef double[:,::1] fisher_deriv_fNL_feat_res(double[:,:,:,::1] flXs, double[:] 
             for il in xrange(nl):
                 for iu in xrange(nu):
                     for ju in xrange(nu):
-                        tmp = 0.
+                        tmp22 = 0.
+                        tmp23 = 0.
+                        tmp32 = 0.
+                        tmp33 = 0.
                         for ipol in xrange(npol):
                             for jpol in xrange(npol):
-                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXs[il+lmin,ipol,ir,iu]*flXs[il+lmin,jpol,jr,ju]
-                        zeta_scratch[tid,il,iu,ju] = twol_arr[il]*tmp
+                                tmp22 = tmp22 + inv_Cl_mat[ipol,jpol,il+lmin]*flXs2[il+lmin,ipol,ir,iu]*flXs2[il+lmin,jpol,jr,ju]
+                                tmp23 = tmp23 + inv_Cl_mat[ipol,jpol,il+lmin]*flXs2[il+lmin,ipol,ir,iu]*flXs3[il+lmin,jpol,jr,ju]
+                                tmp32 = tmp32 + inv_Cl_mat[ipol,jpol,il+lmin]*flXs3[il+lmin,ipol,ir,iu]*flXs2[il+lmin,jpol,jr,ju]
+                                tmp33 = tmp33 + inv_Cl_mat[ipol,jpol,il+lmin]*flXs3[il+lmin,ipol,ir,iu]*flXs3[il+lmin,jpol,jr,ju]
+                        zeta22[tid,il,iu,ju] = twol_arr[il]*tmp22
+                        zeta23[tid,il,iu,ju] = twol_arr[il]*tmp23
+                        zeta32[tid,il,iu,ju] = twol_arr[il]*tmp32
+                        zeta33[tid,il,iu,ju] = twol_arr[il]*tmp33
 
             acc = 0.
             for iu in xrange(nu):
                 for ju in xrange(nu):
-                    acc = acc + u_weights_re[iu]*u_weights_re[ju]*_zeta_sum_full_symB(zeta_scratch[tid,:,iu,ju], legs, w_mus, nmu, nl)
+
+                    # mu-sum for each of the 9 (Ma,Mb) group-pair brackets
+                    m11 = 0.
+                    m12 = 0.
+                    m13 = 0.
+                    m21 = 0.
+                    m22 = 0.
+                    m23 = 0.
+                    m31 = 0.
+                    m32 = 0.
+                    m33 = 0.
+                    for imu in xrange(nmu):
+                        s22 = 0.
+                        s23 = 0.
+                        s32 = 0.
+                        s33 = 0.
+                        for il in xrange(nl):
+                            s22 = s22 + zeta22[tid,il,iu,ju]*legs[imu,il]
+                            s23 = s23 + zeta23[tid,il,iu,ju]*legs[imu,il]
+                            s32 = s32 + zeta32[tid,il,iu,ju]*legs[imu,il]
+                            s33 = s33 + zeta33[tid,il,iu,ju]*legs[imu,il]
+                        m11 = m11 + w_mus[imu]*6.*s33*s33*s33
+                        m12 = m12 + w_mus[imu]*6.*s32*s32*s33
+                        m13 = m13 + w_mus[imu]*6.*s32*s32*s32
+                        m21 = m21 + w_mus[imu]*6.*s23*s23*s33
+                        m22 = m22 + w_mus[imu]*(2.*s22*s22*s33 + 4.*s22*s23*s32)
+                        m23 = m23 + w_mus[imu]*6.*s22*s22*s32
+                        m31 = m31 + w_mus[imu]*6.*s23*s23*s23
+                        m32 = m32 + w_mus[imu]*6.*s22*s22*s23
+                        m33 = m33 + w_mus[imu]*6.*s22*s22*s22
+
+                    acc = acc + (VM1[iu]*VM1[ju]*m11 + VM1[iu]*VM2[ju]*m12 + VM1[iu]*VM3[ju]*m13
+                               + VM2[iu]*VM1[ju]*m21 + VM2[iu]*VM2[ju]*m22 + VM2[iu]*VM3[ju]*m23
+                               + VM3[iu]*VM1[ju]*m31 + VM3[iu]*VM2[ju]*m32 + VM3[iu]*VM3[ju]*m33)
 
             deriv_matrix[ir,jr] = pref*weights[ir]*weights[jr]*acc
             if ir!=jr:
