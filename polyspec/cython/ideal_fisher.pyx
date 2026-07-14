@@ -932,15 +932,15 @@ cpdef double[:,::1] fisher_deriv_fNL_feat_res(double[:,:,:,::1] flXs2, double[:,
                             s23 = s23 + zeta23[tid,il,iu,ju]*legs[imu,il]
                             s32 = s32 + zeta32[tid,il,iu,ju]*legs[imu,il]
                             s33 = s33 + zeta33[tid,il,iu,ju]*legs[imu,il]
-                        m11 = m11 + w_mus[imu]*6.*s33*s33*s33
-                        m12 = m12 + w_mus[imu]*6.*s32*s32*s33
-                        m13 = m13 + w_mus[imu]*6.*s32*s32*s32
-                        m21 = m21 + w_mus[imu]*6.*s23*s23*s33
-                        m22 = m22 + w_mus[imu]*(2.*s22*s22*s33 + 4.*s22*s23*s32)
-                        m23 = m23 + w_mus[imu]*6.*s22*s22*s32
-                        m31 = m31 + w_mus[imu]*6.*s23*s23*s23
-                        m32 = m32 + w_mus[imu]*6.*s22*s22*s23
-                        m33 = m33 + w_mus[imu]*6.*s22*s22*s22
+                        m11 = m11 + w_mus[imu]*3.*s33*s33*s33
+                        m12 = m12 + w_mus[imu]*3.*s32*s32*s33
+                        m13 = m13 + w_mus[imu]*3.*s32*s32*s32
+                        m21 = m21 + w_mus[imu]*3.*s23*s23*s33
+                        m22 = m22 + w_mus[imu]*(1.*s22*s22*s33 + 2.*s22*s23*s32)
+                        m23 = m23 + w_mus[imu]*3.*s22*s22*s32
+                        m31 = m31 + w_mus[imu]*3.*s23*s23*s23
+                        m32 = m32 + w_mus[imu]*3.*s22*s22*s23
+                        m33 = m33 + w_mus[imu]*3.*s22*s22*s22
 
                     acc = acc + (VM1[iu]*VM1[ju]*m11 + VM1[iu]*VM2[ju]*m12 + VM1[iu]*VM3[ju]*m13
                                + VM2[iu]*VM1[ju]*m21 + VM2[iu]*VM2[ju]*m22 + VM2[iu]*VM3[ju]*m23
