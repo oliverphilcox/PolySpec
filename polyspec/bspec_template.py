@@ -208,9 +208,12 @@ class BSpecTemplate():
             self.u_arr = self.feat_params['u_arr']
             self.N_u = len(self.u_arr)
             self.omega = self.feat_params['omega']
-            
-            # Compute weight function, W_j(theta,u) = u^{i*omega-1}/Gamma(i*omega) * w_j(theta)
-            #TODO: implement w_j !=1
+
+            # k-powers (x_j(k) ~ k^{kpow}) needed for the exact separable form of B_res: p_2(k)=k^{-2}e^{-ku}, p_3(k)=k^{-3}e^{-ku}
+            self.feat_kpows = [-2,-3]
+
+            # Common Mellin weight, W(u) = u^{i*omega-1}/Gamma(i*omega); the exact B_res form collapses onto this single weight,
+            # with the extra 1/u, 1/u^3 factors of the u^{i*omega-2}, u^{i*omega-4} pieces applied explicitly at the summation stage.
             log_u = np.log(self.u_arr)
             dlnu = np.zeros(self.N_u, dtype=np.float64)
             dlnu[:-1] += 0.5*np.diff(log_u)
@@ -480,12 +483,12 @@ class BSpecTemplate():
 
         if 'f_exp' in self.to_compute and ints_1d:
 
-            # Compute integrals in Cython, on the decoupled (raw) 2D-template radial grid
             print("Computing exponential f_l^X(r,u) integrals")
-            self.flXs_exp = np.zeros((self.lmax+1,1+2*self.pol,self.N_r,self.N_u),dtype=np.float64,order='C')
-            kpow = -2.0
             #TODO: check amplitude dependence here!
-            q_integral_exp(self.k_arr, Pzeta_arr, self.u_arr, -kpow/3., self.feat_params['kres_cs'], self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_exp)
+            self.flXs_exp = {}
+            for kpow in self.feat_kpows:
+                self.flXs_exp[kpow] = np.zeros((self.lmax+1,1+2*self.pol,self.N_r,self.N_u),dtype=np.float64,order='C')
+                q_integral_exp(self.k_arr, Pzeta_arr, self.u_arr, -kpow/3., self.feat_params['kres_cs'], self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_exp[kpow])
         
         if 'f_bin' in self.to_compute and ints_1d:
             
@@ -688,7 +691,7 @@ class BSpecTemplate():
             return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p4, radial_index) for imap in input_maps],order='C')    
 
         elif filtering=='F_exp':
-            return np.asarray([[self._compute_weighted_map_single(imap, np.asarray(self.flXs_exp[:,:,:,iu],order='C'), radial_index) for iu in range(self.N_u)] for imap in input_maps],order='C')
+            return {kpow: np.asarray([[self._compute_weighted_map_single(imap, np.asarray(self.flXs_exp[kpow][:,:,:,iu],order='C'), radial_index) for iu in range(self.N_u)] for imap in input_maps],order='C') for kpow in self.feat_kpows}
 
         elif filtering=='F_bin':
             return np.asarray([self._compute_weighted_maps(imap, np.asarray(self.flXs_bin[:,:,radial_index,:], order='C')) for imap in input_maps],order='C')
@@ -752,9 +755,10 @@ class BSpecTemplate():
             output['f_osc'] = self._compute_weighted_maps(input_map, self.flXs_osc)
             
         if 'f_exp' in self.to_compute:
-            # Flatten (r,u) to one dimension for the SHT, then restore the two axes
-            flXs_exp_flat = np.asarray(self.flXs_exp.reshape(self.flXs_exp.shape[0], self.flXs_exp.shape[1], -1), order='C')
-            output['f_exp'] = self._compute_weighted_maps(input_map, flXs_exp_flat).reshape(self.N_r, self.N_u, self.base.Npix)
+            output['f_exp'] = {}
+            for kpow in self.feat_kpows:
+                flXs_exp_flat = np.asarray(self.flXs_exp[kpow].reshape(self.flXs_exp[kpow].shape[0], self.flXs_exp[kpow].shape[1], -1), order='C')
+                output['f_exp'][kpow] = self._compute_weighted_maps(input_map, flXs_exp_flat).reshape(self.N_r, self.N_u, self.base.Npix)
             
         # Compute binned maps
         if 'f_bin' in self.to_compute:
@@ -982,7 +986,8 @@ class BSpecTemplate():
 
             elif template=='fNL-feat-res':
                 if verb: print("\tComputing fNL-feat-res Fisher matrix derivative exactly")
-                deriv_matrix = np.asarray(fisher_deriv_fNL_feat_res(self.flXs_exp, self.quad_weights_1d, np.asarray(2.*self.u_weights.real,order='C'), np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
+                #TODO: update to the exact 5-term B_res form (currently uses the old single-term k^{-2} ansatz)
+                deriv_matrix = np.asarray(fisher_deriv_fNL_feat_res(self.flXs_exp[-2], self.quad_weights_1d, self.u_weights, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                     legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
             
             elif 'neural' in template:
@@ -1099,11 +1104,35 @@ class BSpecTemplate():
                 self.timers['fNL_summation'] += time.time()-t_init
 
             elif t=='fNL-feat-res':
-                # fNL-eq template
+                # fNL-feat-res template: exact separable form of B_res, collapsed onto a single u-integral
+                # with common weight W(u) = u^{i*omega-1}/Gamma(i*omega); see eqns.tex for the derivation.
+                # B_res/(As^2 Ares) = -(omega+3i)*pi^4*omega^2*cosh(pi*omega/2)*kappa^{i*omega}
+                #                     * int du W(u) [ p3(k1)p3(k2)p3(k3)*(i*omega-2)/u^3
+                #                                     + (p2(k1)p2(k2)p3(k3) + 2 perm)/u
+                #                                     + p2(k1)p2(k2)p2(k3) ] + c.c.
+                # with p_n(k) = k^{-n} e^{-ku}.
                 print("Computing fNL-feat-res template")
 
                 t_init = time.time()
-                summ = self.utils.fnl_sum_2d_complex(self.r_weights[t], self.u_weights, proc_maps['f_exp'], proc_maps['f_exp'], proc_maps['f_exp'])
+                omega = self.omega
+                kappa = self.feat_params['kres_cs']
+                prefactor = -(omega+3j)*np.pi**4*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
+                u_weights_m1 = self.u_weights/self.u_arr
+                u_weights_m3 = self.u_weights/self.u_arr**3*(1j*omega-2)
+
+                f2, f3 = proc_maps['f_exp'][-2], proc_maps['f_exp'][-3]
+                # All 3 legs use the *same* data map (just filtered differently), so fnl_sum_2d_complex's
+                # pointwise product is commutative under argument-slot permutation: the 3 "2 perm." terms
+                # below are numerically identical, so we use a single call with multiplicity 3 (verified
+                # against the explicit unsimplified 3-call form to machine precision).
+                # p3(k1)p3(k2)p3(k3)
+                bracket  = self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m3, f3, f3, f3)
+                # p2(k1)p2(k2)p3(k3) + 2 perm.
+                bracket += 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m1, f2, f2, f3)
+                # p2(k1)p2(k2)p2(k3)
+                bracket += self.utils.fnl_sum_2d_complex(self.r_weights[t], self.u_weights, f2, f2, f2)
+
+                summ = prefactor*bracket
                 b3_num[index] = 1./3.*summ.real*self.base.A_pix
                 index += 1
                 #TODO: add b1_num
@@ -1235,11 +1264,34 @@ class BSpecTemplate():
                         self.timers['fNL_summation'] += time.time()-t_init
 
                     elif t=='fNL-feat-res':
+                        # Linear term: replace 2 of the 3 legs with simulations, summed over the 3 cyclic
+                        # rotations of each of the 5 cubic-term pieces. fnl_sum_2d_complex is commutative in
+                        # its 3 map arguments (verified numerically), so many of the resulting 15 raw
+                        # (piece, rotation) terms coincide -- not only within a piece (2 legs sharing a
+                        # k-power filter merge), but *across* the 3 mixed p2p2p3-type pieces too, since they
+                        # all share the same u-weight and reduce to just 2 distinct (data,sim) multisets.
+                        # This collapses to 4 distinct calls; verified to match the fully explicit,
+                        # unmerged 15-call sum to machine precision.
                         t_init = time.time()
+                        omega = self.omega
+                        kappa = self.feat_params['kres_cs']
+                        prefactor = -(omega+3j)*np.pi**4*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
+                        u_weights_m1 = self.u_weights/self.u_arr
+                        u_weights_m3 = self.u_weights/self.u_arr**3*(1j*omega-2)
 
-                        #TODO: add asymmetric form
-                        summ = self.utils.fnl_sum_2d_complex(self.r_weights[t], self.u_weights, proc_maps['f_exp'], this_proc_maps['f_exp'], this_proc_maps['f_exp'])
-                        b1_num[index] += -summ.real*self.base.A_pix/self.N_it
+                        f2, f3 = proc_maps['f_exp'][-2], proc_maps['f_exp'][-3]
+                        sf2, sf3 = this_proc_maps['f_exp'][-2], this_proc_maps['f_exp'][-3]
+
+                        # p3(k1)p3(k2)p3(k3): all 3 legs identical -> single call, x3
+                        bracket  = 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m3, f3, sf3, sf3)
+                        # p2p2p3 + 2 perm.: data in a p2 slot (x6, from all 3 pieces' 2 p2-slots each) or the p3 slot (x3)
+                        bracket += 6*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m1, f2, sf2, sf3)
+                        bracket += 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m1, sf2, sf2, f3)
+                        # p2(k1)p2(k2)p2(k3): all 3 legs identical -> single call, x3
+                        bracket += 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], self.u_weights, f2, sf2, sf2)
+
+                        summ = prefactor*bracket
+                        b1_num[index] += -1./3.*summ.real*self.base.A_pix/self.N_it
                         index += 1
                         self.timers['fNL_summation'] += time.time()-t_init
 
@@ -1710,12 +1762,13 @@ class BSpecTemplate():
 
                     elif t=='fNL-feat-res':
                         if (verb and radial_index==0): print("Computing Q-derivative for fNL-feat-res")
+                        #TODO: update to the exact 5-term B_res form (currently uses the old single-term k^{-2} ansatz)
 
                         # Iterate over both the 11 and 22 pieces
                         for index in [0,1]:
                             for iu in range(self.N_u):
-                                prod_map = self.utils.multiply(Fexp_maps[index,iu], Fexp_maps[index,iu])
-                                filt = np.asarray(self.flXs_exp[:,:,[radial_index],iu], order='C')
+                                prod_map = self.utils.multiply(Fexp_maps[-2][index,iu], Fexp_maps[-2][index,iu])
+                                filt = np.asarray(self.flXs_exp[-2][:,:,[radial_index],iu], order='C')
                                 Qs[index,q_index] += 2.*self.u_weights[iu].real*self._transform_maps(prod_map, filt, self.r_weights[t][[radial_index]])
                         q_index += 1
 

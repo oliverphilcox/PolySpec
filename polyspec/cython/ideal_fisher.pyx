@@ -860,35 +860,27 @@ cpdef double[:,::1] fisher_deriv_fNL_binned(double[:,:,::1] flXs, double[:] weig
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-cpdef double[:,::1] fisher_deriv_fNL_feat_res(double[:,:,:,::1] flXs, double[:] weights, double[:] u_weights, double[:,:,::1] inv_Cl_mat, double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
-    """Compute the exact Fisher matrix for the fNL^{feat-res} template (A_j=B_j=C_j fully-symmetric bispectrum
-    with an additional u integral, e.g. for resonant features). The u, u' integral is done explicitly for each
-    (r, r') pair, so the output is a pure function of (r, r') -- used for radial-point selection, where u is
-    not itself being optimized/compressed over.
-
-    flXs has shape (lmax+1, npol, nr, nu). u_weights (real, = 2*Re[W_j(u)], including quadrature weights) has
-    shape (nu,). Per eq. 43-44: pref = 1/(4pi) * 1/36 (A_s^4 already folded into flXs). The 6 identical leg-
-    permutations (+5 perms) combine with the 1/2 from the dmu/2 integral to give a net factor of 3, which
-    exactly cancels _zeta_sum_full_symB's own built-in factor of 3, so no extra multiplier is needed."""
+cpdef double[:,::1] fisher_deriv_fNL_feat_res(double[:,:,:,::1] flXs, double[:] weights, double complex[:] u_weights, double[:,:,::1] inv_Cl_mat, double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
+    """Compute the exact Fisher matrix for the fNL^{feat-res} template, integrating explicitly over u, u' so the output is a pure function of (r, r')."""
 
     cdef int nl = lmax+1-lmin, nr = flXs.shape[2], nu = flXs.shape[3], npol = flXs.shape[1], nmu = len(w_mus)
     cdef int il, ir, jr, iu, ju, ipol, jpol, tid
     cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
+    cdef double[:] u_weights_re = np.zeros(nu,dtype=np.float64)
     cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
     cdef double[:,:,:,::1] zeta_scratch = np.zeros((nthreads,nl,nu,nu),dtype=np.float64)
     cdef double pref = dpow(4.*M_PI,-1)/36.
     cdef double acc, tmp
 
-    # Precompute l-dependent factors
     for il in xrange(nl):
         twol_arr[il] = (2.*il+2*lmin+1.)
+    for iu in xrange(nu):
+        u_weights_re[iu] = 2.*u_weights[iu].real
 
-    # Loop over radial pairs, explicitly integrating over u, u' for each
     for ir in prange(nr, nogil=True, schedule='static', num_threads=nthreads):
         tid = threadid()
         for jr in xrange(ir,nr):
 
-            # Compute (2l+1) u^Y S^-1 v^X for this (r, r'), for each l, u, u'
             for il in xrange(nl):
                 for iu in xrange(nu):
                     for ju in xrange(nu):
@@ -898,11 +890,10 @@ cpdef double[:,::1] fisher_deriv_fNL_feat_res(double[:,:,:,::1] flXs, double[:] 
                                 tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXs[il+lmin,ipol,ir,iu]*flXs[il+lmin,jpol,jr,ju]
                         zeta_scratch[tid,il,iu,ju] = twol_arr[il]*tmp
 
-            # Explicit sum over u, u'
             acc = 0.
             for iu in xrange(nu):
                 for ju in xrange(nu):
-                    acc = acc + u_weights[iu]*u_weights[ju]*_zeta_sum_full_symB(zeta_scratch[tid,:,iu,ju], legs, w_mus, nmu, nl)
+                    acc = acc + u_weights_re[iu]*u_weights_re[ju]*_zeta_sum_full_symB(zeta_scratch[tid,:,iu,ju], legs, w_mus, nmu, nl)
 
             deriv_matrix[ir,jr] = pref*weights[ir]*weights[jr]*acc
             if ir!=jr:
