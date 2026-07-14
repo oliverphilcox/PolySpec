@@ -977,7 +977,12 @@ class BSpecTemplate():
             elif template=='binned':
                 if verb: print("\tComputing binned Fisher matrix derivative exactly")
                 flXs_bin_sum = np.asarray(self.flXs_bin.sum(axis=3), order='C', dtype=np.float64)
-                deriv_matrix = np.asarray(fisher_deriv_fNL_binned(flXs_bin_sum, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                deriv_matrix = np.asarray(fisher_deriv_fNL_binned(flXs_bin_sum, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
+                                    legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+
+            elif template=='fNL-feat-res':
+                if verb: print("\tComputing fNL-feat-res Fisher matrix derivative exactly")
+                deriv_matrix = np.asarray(fisher_deriv_fNL_feat_res(self.flXs_exp, self.quad_weights_1d, np.asarray(2.*self.u_weights.real,order='C'), np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                     legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
             
             elif 'neural' in template:
