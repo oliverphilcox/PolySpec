@@ -688,7 +688,7 @@ class BSpecTemplate():
             return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p4, radial_index) for imap in input_maps],order='C')    
 
         elif filtering=='F_exp':
-            return np.asarray([self._compute_weighted_map_single(imap, self.flXs_exp, radial_index) for imap in input_maps],order='C')
+            return np.asarray([[self._compute_weighted_map_single(imap, np.asarray(self.flXs_exp[:,:,:,iu],order='C'), radial_index) for iu in range(self.N_u)] for imap in input_maps],order='C')
 
         elif filtering=='F_bin':
             return np.asarray([self._compute_weighted_maps(imap, np.asarray(self.flXs_bin[:,:,radial_index,:], order='C')) for imap in input_maps],order='C')
@@ -1576,7 +1576,10 @@ class BSpecTemplate():
                     Fm1_maps = self._filter_pair(Uinv_a_lms, 'F_m1', radial_index)   
                 if 'f_m2' in self.to_compute:
                     if (verb and radial_index==0): print("Creating F[-2] maps")
-                    Fm2_maps = self._filter_pair(Uinv_a_lms, 'F_m2', radial_index)   
+                    Fm2_maps = self._filter_pair(Uinv_a_lms, 'F_m2', radial_index)
+                if 'f_exp' in self.to_compute:
+                    if (verb and radial_index==0): print("Creating F[exp] maps")
+                    Fexp_maps = self._filter_pair(Uinv_a_lms, 'F_exp', radial_index)
                 if 'f_bin' in self.to_compute:
                     if (verb and radial_index==0): print("Creating binned F maps")
                     F_bin_maps = self._filter_pair(Uinv_a_lms, 'F_bin', radial_index)[:,:,None,:]
@@ -1698,6 +1701,17 @@ class BSpecTemplate():
                             Qs[index,q_index] += transform(-(3+p)*mult(-1,-1,index)+10./3.*p*mult(-2,0,index),2)
                             Qs[index,q_index] -= 4./3.*p*transform(mult(-2,-1,index),3)
                             Qs[index,q_index] += 1./9.*p*transform(mult(-2,-2,index),4)
+                        q_index += 1
+
+                    elif t=='fNL-feat-res':
+                        if (verb and radial_index==0): print("Computing Q-derivative for fNL-feat-res")
+
+                        # Iterate over both the 11 and 22 pieces
+                        for index in [0,1]:
+                            for iu in range(self.N_u):
+                                prod_map = self.utils.multiply(Fexp_maps[index,iu], Fexp_maps[index,iu])
+                                filt = np.asarray(self.flXs_exp[:,:,[radial_index],iu], order='C')
+                                Qs[index,q_index] += 2.*self.u_weights[iu].real*self._transform_maps(prod_map, filt, self.r_weights[t][[radial_index]])
                         q_index += 1
 
                     elif 'neural' in t:
