@@ -484,11 +484,13 @@ class BSpecTemplate():
         if 'f_exp' in self.to_compute and ints_1d:
 
             print("Computing exponential f_l^X(r,u) integrals")
-            #TODO: check amplitude dependence here!
+            # Legs are pure k^{kpow} power laws (ns=1 slope, no As); the full As^2 amplitude dependence is
+            # instead applied explicitly via the (2 pi^2 As)^2 prefactor in Bl_numerator, so every term
+            # (regardless of which k-powers it mixes) carries exactly As^2.
             self.flXs_exp = {}
             for kpow in self.feat_kpows:
                 self.flXs_exp[kpow] = np.zeros((self.lmax+1,1+2*self.pol,self.N_r,self.N_u),dtype=np.float64,order='C')
-                q_integral_exp(self.k_arr, Pzeta_arr, self.u_arr, -kpow/3., self.feat_params['kres_cs'], self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_exp[kpow])
+                q_integral_exp(self.k_arr, float(kpow), self.u_arr, self.feat_params['kres_cs'], self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_exp[kpow])
         
         if 'f_bin' in self.to_compute and ints_1d:
             
@@ -1106,17 +1108,18 @@ class BSpecTemplate():
             elif t=='fNL-feat-res':
                 # fNL-feat-res template: exact separable form of B_res, collapsed onto a single u-integral
                 # with common weight W(u) = u^{i*omega-1}/Gamma(i*omega); see eqns.tex for the derivation.
-                # B_res/(As^2 Ares) = -(omega+3i)*pi^4*omega^2*cosh(pi*omega/2)*kappa^{i*omega}
-                #                     * int du W(u) [ p3(k1)p3(k2)p3(k3)*(i*omega-2)/u^3
-                #                                     + (p2(k1)p2(k2)p3(k3) + 2 perm)/u
-                #                                     + p2(k1)p2(k2)p2(k3) ] + c.c.
-                # with p_n(k) = k^{-n} e^{-ku}.
+                # B_res/A_res = -(1/4)*(omega+3i)*(2*pi^2*As)^2*omega^2*cosh(pi*omega/2)*kappa^{i*omega}
+                #               * int du W(u) [ p3(k1)p3(k2)p3(k3)*(i*omega-2)/u^3
+                #                               + (p2(k1)p2(k2)p3(k3) + 2 perm)/u
+                #                               + p2(k1)p2(k2)p2(k3) ] + c.c.
+                # with p_n(k) = k^{-n} e^{-ku} (pure power laws, no As; flXs_exp is built from k_arr^{-3} in
+                # place of Pzeta_arr for exactly this reason), so the (2 pi^2 As)^2 must be applied explicitly.
                 print("Computing fNL-feat-res template")
 
                 t_init = time.time()
                 omega = self.omega
                 kappa = self.feat_params['kres_cs']
-                prefactor = -(omega+3j)*np.pi**4*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
+                prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
                 u_weights_m1 = self.u_weights/self.u_arr
                 u_weights_m3 = self.u_weights/self.u_arr**3*(1j*omega-2)
 
@@ -1275,7 +1278,7 @@ class BSpecTemplate():
                         t_init = time.time()
                         omega = self.omega
                         kappa = self.feat_params['kres_cs']
-                        prefactor = -(omega+3j)*np.pi**4*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
+                        prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
                         u_weights_m1 = self.u_weights/self.u_arr
                         u_weights_m3 = self.u_weights/self.u_arr**3*(1j*omega-2)
 

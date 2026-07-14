@@ -438,17 +438,17 @@ cpdef void p_integral_general(double[:] k_arr, double[:] Pzeta_arr, double pow, 
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-cpdef void q_integral_exp(double[:] k_arr, double[:] Pzeta_arr, double[:] u_arr, double pow, double kscale, double[:,:,::1] Tl_arr, double[:,:,::1] jlkr, int lmin, int lmax, int nthreads, np.ndarray[np.float64_t,ndim=4] _integs):
-    """Compute the q_l^X(r, u) integral including a factor of P(k)^{pow} with the trapezium rule."""
-    
+cpdef void q_integral_exp(double[:] k_arr, double kpow, double[:] u_arr, double kscale, double[:,:,::1] Tl_arr, double[:,:,::1] jlkr, int lmin, int lmax, int nthreads, np.ndarray[np.float64_t,ndim=4] _integs):
+    """Compute the q_l^X(r, u) integral including a factor of k^{kpow} with the trapezium rule."""
+
     cdef int il, ik, ir, iu, nk = len(k_arr), nr = _integs.shape[2], nu = _integs.shape[3], nl = lmax+1-lmin, npol = len(Tl_arr)
     cdef double[:] kprod = np.zeros((nk),dtype=np.float64)
     cdef double lpref, f_low, f_high, ksum
     cdef double[:,:,:,::1] integs = _integs
-    
+
     # Compute k-dependent piece
     for ik in prange(nk,nogil=True,schedule='static',num_threads=nthreads):
-        kprod[ik] = 2./M_PI*k_arr[ik]*k_arr[ik]/2.*dpow(Pzeta_arr[ik], pow)
+        kprod[ik] = 2./M_PI*k_arr[ik]*k_arr[ik]/2.*dpow(k_arr[ik], kpow)
     
     # Perform sum for each polarization
     for il in prange(nl,nogil=True,schedule='static',num_threads=nthreads):
