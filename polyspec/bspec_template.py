@@ -212,16 +212,18 @@ class BSpecTemplate():
             # k-powers (x_j(k) ~ k^{kpow}) needed for the exact separable form of B_res: p_2(k)=k^{-2}e^{-ku}, p_3(k)=k^{-3}e^{-ku}
             self.feat_kpows = [-2,-3]
 
-            # Common Mellin weight, W(u) = u^{i*omega-1}; the exact B_res form collapses onto this single weight (with NO
-            # leftover Gamma(i*omega) factor -- it is already fully absorbed into the closed-form 'prefactor' used
-            # wherever u_weights is consumed), with the extra 1/u, 1/u^3 factors of the u^{i*omega-2}, u^{i*omega-4}
-            # pieces applied explicitly at the summation stage.
+            # Quadrature measure for the log-spaced u integral (trapezium rule in ln(u)). This is deliberately
+            # just the real measure 'du', with NO Mellin power of u baked in: the exact B_res form collapses
+            # onto a common u^{i*omega-1} weight (with no leftover Gamma(i*omega) factor -- it is already fully
+            # absorbed into the closed-form 'prefactor' used at each consumption site), but the different groups
+            # (M1,M2,M3) need different powers of u (u^{i*omega-1}, u^{i*omega-2}, u^{i*omega-4}), so that power
+            # is applied explicitly wherever self.u_weights is consumed (numerator, Q-derivative, ideal Fisher).
             log_u = np.log(self.u_arr)
             dlnu = np.zeros(self.N_u, dtype=np.float64)
             dlnu[:-1] += 0.5*np.diff(log_u)
             dlnu[1:] += 0.5*np.diff(log_u)
             du = dlnu*self.u_arr
-            self.u_weights = np.asarray(du*self.u_arr**(1j*self.omega-1.), dtype=np.complex128, order='C')
+            self.u_weights = np.asarray(du, dtype=np.complex128, order='C')
         
         if 'binned' in templates:
             # Check inputs
@@ -997,11 +999,12 @@ class BSpecTemplate():
                 omega = self.omega
                 kappa = self.feat_params['kres_cs']
                 prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-                u_weights_m1 = self.u_weights/self.u_arr
-                u_weights_m3 = self.u_weights/self.u_arr**3*(1j*omega-2)
+                u_weights_m0 = self.u_weights*self.u_arr**(1j*omega-1.)
+                u_weights_m1 = self.u_weights*self.u_arr**(1j*omega-2.)
+                u_weights_m3 = self.u_weights*self.u_arr**(1j*omega-4.)*(1j*omega-2)
                 VM1 = np.asarray(2.*np.real(prefactor*u_weights_m3), order='C')
                 VM2 = np.asarray(2.*np.real(prefactor*3.*u_weights_m1), order='C')
-                VM3 = np.asarray(2.*np.real(prefactor*self.u_weights), order='C')
+                VM3 = np.asarray(2.*np.real(prefactor*u_weights_m0), order='C')
                 deriv_matrix = np.asarray(fisher_deriv_fNL_feat_res(self.flXs_exp[-2], self.flXs_exp[-3], self.quad_weights_1d, VM1, VM2, VM3,
                                     np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                     legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
@@ -1134,8 +1137,9 @@ class BSpecTemplate():
                 omega = self.omega
                 kappa = self.feat_params['kres_cs']
                 prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-                u_weights_m1 = self.u_weights/self.u_arr
-                u_weights_m3 = self.u_weights/self.u_arr**3*(1j*omega-2)
+                u_weights_m0 = self.u_weights*self.u_arr**(1j*omega-1.)
+                u_weights_m1 = self.u_weights*self.u_arr**(1j*omega-2.)
+                u_weights_m3 = self.u_weights*self.u_arr**(1j*omega-4.)*(1j*omega-2)
 
                 f2, f3 = proc_maps['f_exp'][-2], proc_maps['f_exp'][-3]
                 # All 3 legs use the *same* data map (just filtered differently), so fnl_sum_2d_complex's
@@ -1147,7 +1151,7 @@ class BSpecTemplate():
                 # p2(k1)p2(k2)p3(k3) + 2 perm.
                 bracket += 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m1, f2, f2, f3)
                 # p2(k1)p2(k2)p2(k3)
-                bracket += self.utils.fnl_sum_2d_complex(self.r_weights[t], self.u_weights, f2, f2, f2)
+                bracket += self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m0, f2, f2, f2)
 
                 summ = prefactor*bracket
                 b3_num[index] = 1./3.*summ.real*self.base.A_pix
@@ -1293,8 +1297,9 @@ class BSpecTemplate():
                         omega = self.omega
                         kappa = self.feat_params['kres_cs']
                         prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-                        u_weights_m1 = self.u_weights/self.u_arr
-                        u_weights_m3 = self.u_weights/self.u_arr**3*(1j*omega-2)
+                        u_weights_m0 = self.u_weights*self.u_arr**(1j*omega-1.)
+                        u_weights_m1 = self.u_weights*self.u_arr**(1j*omega-2.)
+                        u_weights_m3 = self.u_weights*self.u_arr**(1j*omega-4.)*(1j*omega-2)
 
                         f2, f3 = proc_maps['f_exp'][-2], proc_maps['f_exp'][-3]
                         sf2, sf3 = this_proc_maps['f_exp'][-2], this_proc_maps['f_exp'][-3]
@@ -1305,7 +1310,7 @@ class BSpecTemplate():
                         bracket += 6*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m1, f2, sf2, sf3)
                         bracket += 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m1, sf2, sf2, f3)
                         # p2(k1)p2(k2)p2(k3): all 3 legs identical -> single call, x3
-                        bracket += 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], self.u_weights, f2, sf2, sf2)
+                        bracket += 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m0, f2, sf2, sf2)
 
                         summ = prefactor*bracket
                         b1_num[index] += -1./3.*summ.real*self.base.A_pix/self.N_it
@@ -1782,12 +1787,13 @@ class BSpecTemplate():
                         omega = self.omega
                         kappa = self.feat_params['kres_cs']
                         prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-                        u_weights_m1 = self.u_weights/self.u_arr
-                        u_weights_m3 = self.u_weights/self.u_arr**3*(1j*omega-2)
+                        u_weights_m0 = self.u_weights*self.u_arr**(1j*omega-1.)
+                        u_weights_m1 = self.u_weights*self.u_arr**(1j*omega-2.)
+                        u_weights_m3 = self.u_weights*self.u_arr**(1j*omega-4.)*(1j*omega-2)
                         rw = self.r_weights[t][radial_index]
                         VM1 = np.asarray(2.*np.real(prefactor*u_weights_m3)*rw, order='C')
                         VM2 = np.asarray(2.*np.real(prefactor*u_weights_m1)*rw, order='C')
-                        VM3 = np.asarray(2.*np.real(prefactor*self.u_weights)*rw, order='C')
+                        VM3 = np.asarray(2.*np.real(prefactor*u_weights_m0)*rw, order='C')
 
                         filt_p2 = np.asarray(self.flXs_exp[-2][:,:,radial_index,:], order='C')
                         filt_p3 = np.asarray(self.flXs_exp[-3][:,:,radial_index,:], order='C')
