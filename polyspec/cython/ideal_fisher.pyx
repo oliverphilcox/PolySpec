@@ -1047,6 +1047,304 @@ cpdef double[:,::1] fisher_deriv_fNL_feat_res_2d(double[:,:,::1] flXs2, double[:
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
+cpdef double[:,::1] fisher_deriv_fNL_feat_res_v2(double[:,:,:,::1] flXsm3, double[:,:,:,::1] flXsm2, double[:,:,:,::1] flXsm1, double[:,:,:,::1] flXsp0, double[:,:,:,::1] flXsp1, double[:] weights,
+                                                double[:] VQ1, double[:] VQ2, double[:] VQ3, double[:] VQ4,
+                                                double[:,:,::1] inv_Cl_mat, double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
+    """Compute the exact ideal Fisher matrix for the fNL^feat-res template using the genuinely-convergent
+    (shifted-Mellin) representation: 4 leg-power multisets Q1={-3,-3,1}, Q2={-3,-2,0}, Q3={-3,-1,-1},
+    Q4={-2,-2,-1}, integrating explicitly over u,u' so the output is a pure function of (r,r'). flXsm3,
+    flXsm2, flXsm1, flXsp0, flXsp1 are the k^-3,k^-2,k^-1,k^0,k^+1 radial integrals; VQ1..VQ4 are the
+    real 2*Re(prefactor*multiset-coefficient*u^(i*omega)) arrays. Derived by brute-force enumeration of all
+    6 leg-to-leg bijections between each pair of multisets (divided by 2 for the dmu/2 normalization -- the
+    same method exactly reproduces fisher_deriv_fNL_feat_res's 3x3 group-pair m_ab structure when applied
+    to that (2-leg-power) case, which was used as a sanity check before applying it here)."""
+
+    cdef int nl = lmax+1-lmin, nr = flXsm3.shape[2], nu = flXsm3.shape[3], npol = flXsm3.shape[1], nmu = len(w_mus)
+    cdef int il, ir, jr, iu, ju, ipol, jpol, tid, imu
+    cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
+    cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zeta = np.zeros((nthreads,25,nl),dtype=np.float64)
+    cdef double pref = dpow(4.*M_PI,-1)/36.
+    cdef double acc, tmp
+    cdef double sm3m3, sm3m2, sm3m1, sm3p0, sm3p1, sm2m3, sm2m2, sm2m1, sm2p0, sm2p1, sm1m3, sm1m2, sm1m1, sm1p0, sm1p1, sp0m3, sp0m2, sp0m1, sp0p0, sp0p1, sp1m3, sp1m2, sp1m1, sp1p0, sp1p1
+    cdef double m11, m12, m13, m14, m21, m22, m23, m24, m31, m32, m33, m34, m41, m42, m43, m44
+
+    for il in xrange(nl):
+        twol_arr[il] = (2.*il+2*lmin+1.)
+
+    for ir in prange(nr, nogil=True, schedule='static', num_threads=nthreads):
+        tid = threadid()
+        for jr in xrange(ir,nr):
+
+            acc = 0.
+            for iu in xrange(nu):
+                for ju in xrange(nu):
+
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm3[il+lmin,ipol,ir,iu]*flXsm3[il+lmin,jpol,jr,ju]
+                        zeta[tid,0,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm3[il+lmin,ipol,ir,iu]*flXsm2[il+lmin,jpol,jr,ju]
+                        zeta[tid,1,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm3[il+lmin,ipol,ir,iu]*flXsm1[il+lmin,jpol,jr,ju]
+                        zeta[tid,2,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm3[il+lmin,ipol,ir,iu]*flXsp0[il+lmin,jpol,jr,ju]
+                        zeta[tid,3,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm3[il+lmin,ipol,ir,iu]*flXsp1[il+lmin,jpol,jr,ju]
+                        zeta[tid,4,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm2[il+lmin,ipol,ir,iu]*flXsm3[il+lmin,jpol,jr,ju]
+                        zeta[tid,5,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm2[il+lmin,ipol,ir,iu]*flXsm2[il+lmin,jpol,jr,ju]
+                        zeta[tid,6,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm2[il+lmin,ipol,ir,iu]*flXsm1[il+lmin,jpol,jr,ju]
+                        zeta[tid,7,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm2[il+lmin,ipol,ir,iu]*flXsp0[il+lmin,jpol,jr,ju]
+                        zeta[tid,8,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm2[il+lmin,ipol,ir,iu]*flXsp1[il+lmin,jpol,jr,ju]
+                        zeta[tid,9,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm1[il+lmin,ipol,ir,iu]*flXsm3[il+lmin,jpol,jr,ju]
+                        zeta[tid,10,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm1[il+lmin,ipol,ir,iu]*flXsm2[il+lmin,jpol,jr,ju]
+                        zeta[tid,11,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm1[il+lmin,ipol,ir,iu]*flXsm1[il+lmin,jpol,jr,ju]
+                        zeta[tid,12,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm1[il+lmin,ipol,ir,iu]*flXsp0[il+lmin,jpol,jr,ju]
+                        zeta[tid,13,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsm1[il+lmin,ipol,ir,iu]*flXsp1[il+lmin,jpol,jr,ju]
+                        zeta[tid,14,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsp0[il+lmin,ipol,ir,iu]*flXsm3[il+lmin,jpol,jr,ju]
+                        zeta[tid,15,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsp0[il+lmin,ipol,ir,iu]*flXsm2[il+lmin,jpol,jr,ju]
+                        zeta[tid,16,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsp0[il+lmin,ipol,ir,iu]*flXsm1[il+lmin,jpol,jr,ju]
+                        zeta[tid,17,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsp0[il+lmin,ipol,ir,iu]*flXsp0[il+lmin,jpol,jr,ju]
+                        zeta[tid,18,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsp0[il+lmin,ipol,ir,iu]*flXsp1[il+lmin,jpol,jr,ju]
+                        zeta[tid,19,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsp1[il+lmin,ipol,ir,iu]*flXsm3[il+lmin,jpol,jr,ju]
+                        zeta[tid,20,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsp1[il+lmin,ipol,ir,iu]*flXsm2[il+lmin,jpol,jr,ju]
+                        zeta[tid,21,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsp1[il+lmin,ipol,ir,iu]*flXsm1[il+lmin,jpol,jr,ju]
+                        zeta[tid,22,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsp1[il+lmin,ipol,ir,iu]*flXsp0[il+lmin,jpol,jr,ju]
+                        zeta[tid,23,il] = twol_arr[il]*tmp
+                    for il in xrange(nl):
+                        tmp = 0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                tmp = tmp + inv_Cl_mat[ipol,jpol,il+lmin]*flXsp1[il+lmin,ipol,ir,iu]*flXsp1[il+lmin,jpol,jr,ju]
+                        zeta[tid,24,il] = twol_arr[il]*tmp
+
+                    m11 = 0.
+                    m12 = 0.
+                    m13 = 0.
+                    m14 = 0.
+                    m21 = 0.
+                    m22 = 0.
+                    m23 = 0.
+                    m24 = 0.
+                    m31 = 0.
+                    m32 = 0.
+                    m33 = 0.
+                    m34 = 0.
+                    m41 = 0.
+                    m42 = 0.
+                    m43 = 0.
+                    m44 = 0.
+
+                    for imu in xrange(nmu):
+                        sm3m3 = 0.
+                        sm3m2 = 0.
+                        sm3m1 = 0.
+                        sm3p0 = 0.
+                        sm3p1 = 0.
+                        sm2m3 = 0.
+                        sm2m2 = 0.
+                        sm2m1 = 0.
+                        sm2p0 = 0.
+                        sm2p1 = 0.
+                        sm1m3 = 0.
+                        sm1m2 = 0.
+                        sm1m1 = 0.
+                        sm1p0 = 0.
+                        sm1p1 = 0.
+                        sp0m3 = 0.
+                        sp0m2 = 0.
+                        sp0m1 = 0.
+                        sp0p0 = 0.
+                        sp0p1 = 0.
+                        sp1m3 = 0.
+                        sp1m2 = 0.
+                        sp1m1 = 0.
+                        sp1p0 = 0.
+                        sp1p1 = 0.
+                        for il in xrange(nl):
+                            sm3m3 = sm3m3 + zeta[tid,0,il]*legs[imu,il]
+                            sm3m2 = sm3m2 + zeta[tid,1,il]*legs[imu,il]
+                            sm3m1 = sm3m1 + zeta[tid,2,il]*legs[imu,il]
+                            sm3p0 = sm3p0 + zeta[tid,3,il]*legs[imu,il]
+                            sm3p1 = sm3p1 + zeta[tid,4,il]*legs[imu,il]
+                            sm2m3 = sm2m3 + zeta[tid,5,il]*legs[imu,il]
+                            sm2m2 = sm2m2 + zeta[tid,6,il]*legs[imu,il]
+                            sm2m1 = sm2m1 + zeta[tid,7,il]*legs[imu,il]
+                            sm2p0 = sm2p0 + zeta[tid,8,il]*legs[imu,il]
+                            sm2p1 = sm2p1 + zeta[tid,9,il]*legs[imu,il]
+                            sm1m3 = sm1m3 + zeta[tid,10,il]*legs[imu,il]
+                            sm1m2 = sm1m2 + zeta[tid,11,il]*legs[imu,il]
+                            sm1m1 = sm1m1 + zeta[tid,12,il]*legs[imu,il]
+                            sm1p0 = sm1p0 + zeta[tid,13,il]*legs[imu,il]
+                            sm1p1 = sm1p1 + zeta[tid,14,il]*legs[imu,il]
+                            sp0m3 = sp0m3 + zeta[tid,15,il]*legs[imu,il]
+                            sp0m2 = sp0m2 + zeta[tid,16,il]*legs[imu,il]
+                            sp0m1 = sp0m1 + zeta[tid,17,il]*legs[imu,il]
+                            sp0p0 = sp0p0 + zeta[tid,18,il]*legs[imu,il]
+                            sp0p1 = sp0p1 + zeta[tid,19,il]*legs[imu,il]
+                            sp1m3 = sp1m3 + zeta[tid,20,il]*legs[imu,il]
+                            sp1m2 = sp1m2 + zeta[tid,21,il]*legs[imu,il]
+                            sp1m1 = sp1m1 + zeta[tid,22,il]*legs[imu,il]
+                            sp1p0 = sp1p0 + zeta[tid,23,il]*legs[imu,il]
+                            sp1p1 = sp1p1 + zeta[tid,24,il]*legs[imu,il]
+
+                        m11 = m11 + w_mus[imu]*(1.0*sm3m3*sm3m3*sp1p1 + 2.0*sm3m3*sm3p1*sp1m3)
+                        m12 = m12 + w_mus[imu]*(1.0*sm3m3*sm3m2*sp1p0 + 1.0*sm3m3*sm3p0*sp1m2 + 1.0*sm3m2*sm3p0*sp1m3)
+                        m13 = m13 + w_mus[imu]*(2.0*sm3m3*sm3m1*sp1m1 + 1.0*sm3m1*sm3m1*sp1m3)
+                        m14 = m14 + w_mus[imu]*(1.0*sm3m2*sm3m2*sp1m1 + 2.0*sm3m2*sm3m1*sp1m2)
+                        m21 = m21 + w_mus[imu]*(1.0*sm3m3*sm2m3*sp0p1 + 1.0*sm3m3*sm2p1*sp0m3 + 1.0*sm3p1*sm2m3*sp0m3)
+                        m22 = m22 + w_mus[imu]*(0.5*sm3m3*sm2m2*sp0p0 + 0.5*sm3m3*sm2p0*sp0m2 + 0.5*sm3m2*sm2m3*sp0p0 + 0.5*sm3m2*sm2p0*sp0m3 + 0.5*sm3p0*sm2m3*sp0m2 + 0.5*sm3p0*sm2m2*sp0m3)
+                        m23 = m23 + w_mus[imu]*(1.0*sm3m3*sm2m1*sp0m1 + 1.0*sm3m1*sm2m3*sp0m1 + 1.0*sm3m1*sm2m1*sp0m3)
+                        m24 = m24 + w_mus[imu]*(1.0*sm3m2*sm2m2*sp0m1 + 1.0*sm3m2*sm2m1*sp0m2 + 1.0*sm3m1*sm2m2*sp0m2)
+                        m31 = m31 + w_mus[imu]*(2.0*sm3m3*sm1m3*sm1p1 + 1.0*sm3p1*sm1m3*sm1m3)
+                        m32 = m32 + w_mus[imu]*(1.0*sm3m3*sm1m2*sm1p0 + 1.0*sm3m2*sm1m3*sm1p0 + 1.0*sm3p0*sm1m3*sm1m2)
+                        m33 = m33 + w_mus[imu]*(1.0*sm3m3*sm1m1*sm1m1 + 2.0*sm3m1*sm1m3*sm1m1)
+                        m34 = m34 + w_mus[imu]*(2.0*sm3m2*sm1m2*sm1m1 + 1.0*sm3m1*sm1m2*sm1m2)
+                        m41 = m41 + w_mus[imu]*(1.0*sm2m3*sm2m3*sm1p1 + 2.0*sm2m3*sm2p1*sm1m3)
+                        m42 = m42 + w_mus[imu]*(1.0*sm2m3*sm2m2*sm1p0 + 1.0*sm2m3*sm2p0*sm1m2 + 1.0*sm2m2*sm2p0*sm1m3)
+                        m43 = m43 + w_mus[imu]*(2.0*sm2m3*sm2m1*sm1m1 + 1.0*sm2m1*sm2m1*sm1m3)
+                        m44 = m44 + w_mus[imu]*(1.0*sm2m2*sm2m2*sm1m1 + 2.0*sm2m2*sm2m1*sm1m2)
+
+                    acc = acc + (VQ1[iu]*VQ1[ju]*m11
+                               + VQ1[iu]*VQ2[ju]*m12
+                               + VQ1[iu]*VQ3[ju]*m13
+                               + VQ1[iu]*VQ4[ju]*m14
+                               + VQ2[iu]*VQ1[ju]*m21
+                               + VQ2[iu]*VQ2[ju]*m22
+                               + VQ2[iu]*VQ3[ju]*m23
+                               + VQ2[iu]*VQ4[ju]*m24
+                               + VQ3[iu]*VQ1[ju]*m31
+                               + VQ3[iu]*VQ2[ju]*m32
+                               + VQ3[iu]*VQ3[ju]*m33
+                               + VQ3[iu]*VQ4[ju]*m34
+                               + VQ4[iu]*VQ1[ju]*m41
+                               + VQ4[iu]*VQ2[ju]*m42
+                               + VQ4[iu]*VQ3[ju]*m43
+                               + VQ4[iu]*VQ4[ju]*m44)
+
+            deriv_matrix[ir,jr] = pref*weights[ir]*weights[jr]*acc
+            if ir!=jr:
+                deriv_matrix[jr,ir] = deriv_matrix[ir,jr]
+
+    return deriv_matrix
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
 cpdef double[:,::1] fisher_deriv_fNL_eq(double[:,:,::1] plXs, double[:,:,::1] qlXs, double[:,:,::1] r1lXs, double[:,:,::1] r2lXs, double[:] weights, double[:,:,::1] inv_Cl_mat,
                                    double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
     """Compute the exact Fisher matrix for the fNL^{eq} template."""

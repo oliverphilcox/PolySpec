@@ -995,20 +995,30 @@ class BSpecTemplate():
 
             elif template=='fNL-feat-res':
                 if verb: print("\tComputing fNL-feat-res Fisher matrix derivative exactly")
-                # Grouped into 3 leg-type multisets: M1={p3,p3,p3}, M2={p2,p2,p3}(+2perm), M3={p2,p2,p2}.
-                # VMa = 2*Re(prefactor * group u-weight); this correctly implements the full +c.c.+c.c.
-                # structure (each of the 4 terms {j,k},{j*,k},{j,k*},{j*,k*} collapses since Aj,Bj,Cj are
-                # real, giving [Wj+Wj*][Wk*+Wk] = 2Re(Wj)*2Re(Wk); verified numerically to machine precision).
+                # Genuinely-convergent (shifted-Mellin) representation -- see the cubic-numerator-term
+                # comment in Bl_numerator for the derivation. Grouped into 4 leg-power multisets
+                # Q1={-3,-3,1}, Q2={-3,-2,0}, Q3={-3,-1,-1}, Q4={-2,-2,-1} (vs. the old, divergent
+                # representation's 3 multisets {p3,p3,p3},{p2,p2,p3},{p2,p2,p2}). VQa = 2*Re(prefactor *
+                # multiset coefficient * u^(i*omega)); this correctly implements the full +c.c.+c.c.
+                # structure exactly as before (2Re(Wj)*2Re(Wk), since the zeta brackets are real).
+                # fisher_deriv_fNL_feat_res_v2's 4x4 group-pair (m_ab) structure was derived by brute-force
+                # enumeration of all 6 leg-to-leg bijections per multiset pair (divided by 2 for the dmu/2
+                # normalization); that same method was checked to exactly reproduce the old, already-
+                # validated 3x3 m_ab formulas (m11=3*zeta33^3, m12=3*zeta32^2*zeta33, m22=zeta22^2*zeta33+
+                # 2*zeta22*zeta23*zeta32, etc.) before being applied to the new 4-multiset case.
                 omega = self.omega
                 kappa = self.feat_params['kres_cs']
                 prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-                u_weights_m0 = self.u_weights*self.u_arr**(1j*omega-1.)
-                u_weights_m1 = self.u_weights*self.u_arr**(1j*omega-2.)
-                u_weights_m3 = self.u_weights*self.u_arr**(1j*omega-4.)*(1j*omega-2)
-                VM1 = np.asarray(2.*np.real(prefactor*u_weights_m3), order='C')
-                VM2 = np.asarray(2.*np.real(prefactor*3.*u_weights_m1), order='C')
-                VM3 = np.asarray(2.*np.real(prefactor*u_weights_m0), order='C')
-                deriv_matrix = np.asarray(fisher_deriv_fNL_feat_res(self.flXs_exp[-2], self.flXs_exp[-3], self.quad_weights_1d, VM1, VM2, VM3,
+                u_weight = self.u_weights*self.u_arr**(1j*omega)
+                coeff1 = 1./(1j*omega*(1j*omega-1)*(1j*omega-3))
+                coeff2 = 1./(1j*omega*(1j*omega-1))
+                coeff3 = 1./(1j*omega)
+                VQ1 = np.asarray(2.*np.real(prefactor*(3.*coeff1)*u_weight), order='C')
+                VQ2 = np.asarray(2.*np.real(prefactor*(24.*coeff1+6.*coeff2)*u_weight), order='C')
+                VQ3 = np.asarray(2.*np.real(prefactor*(18.*coeff1+6.*coeff2)*u_weight), order='C')
+                VQ4 = np.asarray(2.*np.real(prefactor*(36.*coeff1+15.*coeff2+3.*coeff3)*u_weight), order='C')
+                deriv_matrix = np.asarray(fisher_deriv_fNL_feat_res_v2(self.flXs_exp[-3], self.flXs_exp[-2], self.flXs_exp[-1], self.flXs_exp[0], self.flXs_exp[1],
+                                    self.quad_weights_1d, VQ1, VQ2, VQ3, VQ4,
                                     np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                     legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
             
@@ -1363,32 +1373,38 @@ class BSpecTemplate():
                         self.timers['fNL_summation'] += time.time()-t_init
 
                     elif t=='fNL-feat-res':
-                        # Linear term: replace 2 of the 3 legs with simulations, summed over the 3 cyclic
-                        # rotations of each of the 5 cubic-term pieces. fnl_sum_2d_complex is commutative in
-                        # its 3 map arguments (verified numerically), so many of the resulting 15 raw
-                        # (piece, rotation) terms coincide -- not only within a piece (2 legs sharing a
-                        # k-power filter merge), but *across* the 3 mixed p2p2p3-type pieces too, since they
-                        # all share the same u-weight and reduce to just 2 distinct (data,sim) multisets.
-                        # This collapses to 4 distinct calls; verified to match the fully explicit,
-                        # unmerged 15-call sum to machine precision.
+                        # Linear term for the genuinely-convergent representation (see the cubic-term
+                        # comment above for the Mellin-shift derivation). Replace 1 of the 3 legs with data
+                        # and the other 2 with simulations, summed over the 3 cyclic rotations of each of
+                        # the 36 raw cubic-term pieces (108 raw linear sub-terms). Since fnl_sum_2d_complex
+                        # is trivially symmetric under reordering its 3 map arguments, raw sub-terms that
+                        # reduce to the same (data-leg-power, {sim-leg-power multiset}) collapse to a single
+                        # call; this leaves just 9 distinct combinations (derived combinatorially and
+                        # verified against the fully explicit, unmerged form on an actual SHT-based
+                        # numerator run to machine precision).
                         t_init = time.time()
                         omega = self.omega
                         kappa = self.feat_params['kres_cs']
                         prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-                        u_weights_m0 = self.u_weights*self.u_arr**(1j*omega-1.)
-                        u_weights_m1 = self.u_weights*self.u_arr**(1j*omega-2.)
-                        u_weights_m3 = self.u_weights*self.u_arr**(1j*omega-4.)*(1j*omega-2)
+                        u_weight = self.u_weights*self.u_arr**(1j*omega)
+                        coeff1 = 1./(1j*omega*(1j*omega-1)*(1j*omega-3))
+                        coeff2 = 1./(1j*omega*(1j*omega-1))
+                        coeff3 = 1./(1j*omega)
 
-                        f2, f3 = proc_maps['f_exp'][-2], proc_maps['f_exp'][-3]
-                        sf2, sf3 = this_proc_maps['f_exp'][-2], this_proc_maps['f_exp'][-3]
+                        fm3, fm2, fm1, f0, fp1 = (proc_maps['f_exp'][-3], proc_maps['f_exp'][-2], proc_maps['f_exp'][-1],
+                                                  proc_maps['f_exp'][0], proc_maps['f_exp'][1])
+                        sfm3, sfm2, sfm1, sf0, sfp1 = (this_proc_maps['f_exp'][-3], this_proc_maps['f_exp'][-2], this_proc_maps['f_exp'][-1],
+                                                       this_proc_maps['f_exp'][0], this_proc_maps['f_exp'][1])
 
-                        # p3(k1)p3(k2)p3(k3): all 3 legs identical -> single call, x3
-                        bracket  = 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m3, f3, sf3, sf3)
-                        # p2p2p3 + 2 perm.: data in a p2 slot (x6, from all 3 pieces' 2 p2-slots each) or the p3 slot (x3)
-                        bracket += 6*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m1, f2, sf2, sf3)
-                        bracket += 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m1, sf2, sf2, f3)
-                        # p2(k1)p2(k2)p2(k3): all 3 legs identical -> single call, x3
-                        bracket += 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m0, f2, sf2, sf2)
+                        bracket  = (6.*coeff1)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, sfm3, sfp1)
+                        bracket += (24.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, sfm2, sf0)
+                        bracket += (18.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, sfm1, sfm1)
+                        bracket += (24.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm2, sfm3, sf0)
+                        bracket += (72.*coeff1+30.*coeff2+6.*coeff3)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm2, sfm2, sfm1)
+                        bracket += (36.*coeff1+12.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm1, sfm3, sfm1)
+                        bracket += (36.*coeff1+15.*coeff2+3.*coeff3)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm1, sfm2, sfm2)
+                        bracket += (24.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, f0, sfm3, sfm2)
+                        bracket += (3.*coeff1)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fp1, sfm3, sfm3)
 
                         summ = prefactor*bracket
                         b1_num[index] += -1./3.*summ.real*self.base.A_pix/self.N_it
@@ -1861,32 +1877,68 @@ class BSpecTemplate():
                         q_index += 1
 
                     elif t=='fNL-feat-res':
+                        # Q-derivative for the genuinely-convergent representation (see the cubic-term
+                        # comment above for the Mellin-shift derivation). By the product rule, d/da_lm of a
+                        # merged cubic term fnl_sum(A,B,C) (A,B,C legs from the 4-multiset decomposition)
+                        # gives, for each DISTINCT leg power v present in {A,B,C}, a term
+                        # (count of v in the multiset) * transform(inner=product of the OTHER 2 legs, outer=v)
+                        # -- e.g. for {-3,-3,1} (coeff K1=3*c1): outer=-3 has multiplicity 2 (inner=-3,1 leg
+                        # product), outer=1 has multiplicity 1 (inner=-3,-3 leg product); matches the existing
+                        # fNL-loc pattern (2*transform(mult(-1,2),-1)+transform(mult(-1,-1),2)) for a repeated-
+                        # twice multiset. Collecting all 4 multisets' contributions by outer power gives 9
+                        # distinct (inner-product, outer-filter) terms, each with its own omega-dependent
+                        # coefficient (a linear combination of the c1,c2,c3 group coefficients). Verified
+                        # against the fully explicit, unmerged (36-raw-term x 3-outer-choices) form on an
+                        # actual SHT-based run to machine precision (that check only validates internal
+                        # combinatorial consistency, not the overall scale -- see below).
+                        #
+                        # Overall normalization: the general Q_lm^X[x,y] formula (eqns.tex) has an explicit
+                        # 1/6 prefactor together with "+5 perms", i.e. it sums over all 6 distinguishable
+                        # (outer, B-slot-with-x, C-slot-with-y) bijections. This code's "3 outer choices"
+                        # construction only distinguishes which leg is outer, not the (x,y) order of the 2
+                        # inner legs (mult() is symmetric, so swapping which inner leg gets 'x' vs 'y' is not
+                        # separately counted) -- i.e. it implicitly sums only 3 of the 6 bijections, with each
+                        # of those 3 representing 2 of the true 6 (the x<->y swap). So an extra 1/3 (= (1/6)
+                        # of 6 true bijections, divided by the 2 already-collapsed via mult()'s symmetry, per
+                        # 3 counted terms) is needed on top of the "count of occurrences" multiplicities used
+                        # below. Confirmed by direct numerical differentiation of the (independently-verified)
+                        # cubic numerator w.r.t. a single a_lm mode: this code's Q_lm was exactly 3x the true
+                        # derivative before this 1/3 was added (ratio 3.006, both real and imaginary parts).
                         if (verb and radial_index==0): print("Computing Q-derivative for fNL-feat-res")
                         omega = self.omega
                         kappa = self.feat_params['kres_cs']
                         prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-                        u_weights_m0 = self.u_weights*self.u_arr**(1j*omega-1.)
-                        u_weights_m1 = self.u_weights*self.u_arr**(1j*omega-2.)
-                        u_weights_m3 = self.u_weights*self.u_arr**(1j*omega-4.)*(1j*omega-2)
+                        u_weight = self.u_weights*self.u_arr**(1j*omega)
+                        coeff1 = 1./(1j*omega*(1j*omega-1)*(1j*omega-3))
+                        coeff2 = 1./(1j*omega*(1j*omega-1))
+                        coeff3 = 1./(1j*omega)
                         rw = self.r_weights[t][radial_index]
-                        VM1 = np.asarray(2.*np.real(prefactor*u_weights_m3)*rw, order='C')
-                        VM2 = np.asarray(2.*np.real(prefactor*u_weights_m1)*rw, order='C')
-                        VM3 = np.asarray(2.*np.real(prefactor*u_weights_m0)*rw, order='C')
+                        WC1 = np.asarray(2.*np.real(prefactor*coeff1*u_weight)*rw/3., order='C')
+                        WC2 = np.asarray(2.*np.real(prefactor*coeff2*u_weight)*rw/3., order='C')
+                        WC3 = np.asarray(2.*np.real(prefactor*coeff3*u_weight)*rw/3., order='C')
 
-                        filt_p2 = np.asarray(self.flXs_exp[-2][:,:,radial_index,:], order='C')
-                        filt_p3 = np.asarray(self.flXs_exp[-3][:,:,radial_index,:], order='C')
+                        filt_m3 = np.asarray(self.flXs_exp[-3][:,:,radial_index,:], order='C')
+                        filt_m2 = np.asarray(self.flXs_exp[-2][:,:,radial_index,:], order='C')
+                        filt_m1 = np.asarray(self.flXs_exp[-1][:,:,radial_index,:], order='C')
+                        filt_0  = np.asarray(self.flXs_exp[0][:,:,radial_index,:], order='C')
+                        filt_p1 = np.asarray(self.flXs_exp[1][:,:,radial_index,:], order='C')
 
                         for index in [0,1]:
-                            f2 = np.asarray(Fexp_maps[-2][index,:,0,:], order='C')
-                            f3 = np.asarray(Fexp_maps[-3][index,:,0,:], order='C')
-                            prod_p3p3 = self.utils.multiply(f3, f3)
-                            prod_p2p3 = self.utils.multiply(f2, f3)
-                            prod_p2p2 = self.utils.multiply(f2, f2)
+                            fm3 = np.asarray(Fexp_maps[-3][index,:,0,:], order='C')
+                            fm2 = np.asarray(Fexp_maps[-2][index,:,0,:], order='C')
+                            fm1 = np.asarray(Fexp_maps[-1][index,:,0,:], order='C')
+                            f0  = np.asarray(Fexp_maps[0][index,:,0,:], order='C')
+                            fp1 = np.asarray(Fexp_maps[1][index,:,0,:], order='C')
 
-                            Qs[index,q_index] += self._transform_maps(prod_p3p3, filt_p3, VM1)
-                            Qs[index,q_index] += self._transform_maps(prod_p2p3, filt_p2, 2.*VM2)
-                            Qs[index,q_index] += self._transform_maps(prod_p2p2, filt_p3, VM2)
-                            Qs[index,q_index] += self._transform_maps(prod_p2p2, filt_p2, VM3)
+                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fp1, fm3), filt_m3, 6.*WC1)
+                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm2, f0), filt_m3, 24.*WC1+6.*WC2)
+                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm1, fm1), filt_m3, 18.*WC1+6.*WC2)
+                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm3, f0), filt_m2, 24.*WC1+6.*WC2)
+                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm2, fm1), filt_m2, 72.*WC1+30.*WC2+6.*WC3)
+                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm3, fm1), filt_m1, 36.*WC1+12.*WC2)
+                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm2, fm2), filt_m1, 36.*WC1+15.*WC2+3.*WC3)
+                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm3, fm2), filt_0, 24.*WC1+6.*WC2)
+                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm3, fm3), filt_p1, 3.*WC1)
                         q_index += 1
 
                     elif 'neural' in t:
