@@ -3,7 +3,7 @@
 
 import numpy as np
 import time
-from scipy.special import gamma, p_roots, lpmn
+from scipy.special import p_roots, lpmn
 from .cython.k_integrals import *
 from .cython.ideal_fisher import *
 from .cython.fNL_utils import *
@@ -212,14 +212,16 @@ class BSpecTemplate():
             # k-powers (x_j(k) ~ k^{kpow}) needed for the exact separable form of B_res: p_2(k)=k^{-2}e^{-ku}, p_3(k)=k^{-3}e^{-ku}
             self.feat_kpows = [-2,-3]
 
-            # Common Mellin weight, W(u) = u^{i*omega-1}/Gamma(i*omega); the exact B_res form collapses onto this single weight,
-            # with the extra 1/u, 1/u^3 factors of the u^{i*omega-2}, u^{i*omega-4} pieces applied explicitly at the summation stage.
+            # Common Mellin weight, W(u) = u^{i*omega-1}; the exact B_res form collapses onto this single weight (with NO
+            # leftover Gamma(i*omega) factor -- it is already fully absorbed into the closed-form 'prefactor' used
+            # wherever u_weights is consumed), with the extra 1/u, 1/u^3 factors of the u^{i*omega-2}, u^{i*omega-4}
+            # pieces applied explicitly at the summation stage.
             log_u = np.log(self.u_arr)
             dlnu = np.zeros(self.N_u, dtype=np.float64)
             dlnu[:-1] += 0.5*np.diff(log_u)
             dlnu[1:] += 0.5*np.diff(log_u)
             du = dlnu*self.u_arr
-            self.u_weights = np.asarray(du*self.u_arr**(1j*self.omega-1.)/gamma(1j*self.omega), dtype=np.complex128, order='C')
+            self.u_weights = np.asarray(du*self.u_arr**(1j*self.omega-1.), dtype=np.complex128, order='C')
         
         if 'binned' in templates:
             # Check inputs
@@ -490,7 +492,7 @@ class BSpecTemplate():
             self.flXs_exp = {}
             for kpow in self.feat_kpows:
                 self.flXs_exp[kpow] = np.zeros((self.lmax+1,1+2*self.pol,self.N_r,self.N_u),dtype=np.float64,order='C')
-                q_integral_exp(self.k_arr, float(kpow), self.u_arr, self.feat_params['kres_cs'], self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_exp[kpow])
+                q_integral_exp(self.k_arr, float(kpow), self.u_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_exp[kpow])
         
         if 'f_bin' in self.to_compute and ints_1d:
             

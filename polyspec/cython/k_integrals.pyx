@@ -438,8 +438,8 @@ cpdef void p_integral_general(double[:] k_arr, double[:] Pzeta_arr, double pow, 
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-cpdef void q_integral_exp(double[:] k_arr, double kpow, double[:] u_arr, double kscale, double[:,:,::1] Tl_arr, double[:,:,::1] jlkr, int lmin, int lmax, int nthreads, np.ndarray[np.float64_t,ndim=4] _integs):
-    """Compute the q_l^X(r, u) integral including a factor of k^{kpow} with the trapezium rule."""
+cpdef void q_integral_exp(double[:] k_arr, double kpow, double[:] u_arr, double[:,:,::1] Tl_arr, double[:,:,::1] jlkr, int lmin, int lmax, int nthreads, np.ndarray[np.float64_t,ndim=4] _integs):
+    """Compute the q_l^X(r, u) integral including a factor of k^{kpow} with the trapezium rule. Note that u is dimensionless here; any k_res/c_s rescaling must be applied externally."""
 
     cdef int il, ik, ir, iu, nk = len(k_arr), nr = _integs.shape[2], nu = _integs.shape[3], nl = lmax+1-lmin, npol = len(Tl_arr)
     cdef double[:] kprod = np.zeros((nk),dtype=np.float64)
@@ -461,25 +461,25 @@ cpdef void q_integral_exp(double[:] k_arr, double kpow, double[:] u_arr, double 
             for iu in xrange(nu):
                 
                 # Compute trapezium rule
-                f_low = kprod[0]*Tl_arr[0,lmin+il,0]*jlkr[il,ir,0]*exp(-k_arr[0]*u_arr[iu]/kscale)
+                f_low = kprod[0]*Tl_arr[0,lmin+il,0]*jlkr[il,ir,0]*exp(-k_arr[0]*u_arr[iu])
                 for ik in xrange(1,nk):
-                    f_high = kprod[ik]*Tl_arr[0,lmin+il,ik]*jlkr[il,ir,ik]*exp(-k_arr[ik]*u_arr[iu]/kscale)
+                    f_high = kprod[ik]*Tl_arr[0,lmin+il,ik]*jlkr[il,ir,ik]*exp(-k_arr[ik]*u_arr[iu])
                     integs[lmin+il,0,ir,iu] += lpref*(k_arr[ik]-k_arr[ik-1])*(f_low+f_high)
                     f_low = f_high
     if npol>1:
         for il in prange(nl,nogil=True,schedule='static',num_threads=nthreads):
             lpref = dpow(-1.,lmin+il)
-            
+
             # Iterate over r
             for ir in xrange(nr):
 
                 # Iterate over u
                 for iu in xrange(nu):
-                    
+
                     # Compute trapezium rule
-                    f_low = kprod[0]*Tl_arr[1,lmin+il,0]*jlkr[il,ir,0]*exp(-k_arr[0]*u_arr[iu]/kscale)
+                    f_low = kprod[0]*Tl_arr[1,lmin+il,0]*jlkr[il,ir,0]*exp(-k_arr[0]*u_arr[iu])
                     for ik in xrange(1,nk):
-                        f_high = kprod[ik]*Tl_arr[1,lmin+il,ik]*jlkr[il,ir,ik]*exp(-k_arr[ik]*u_arr[iu]/kscale)
+                        f_high = kprod[ik]*Tl_arr[1,lmin+il,ik]*jlkr[il,ir,ik]*exp(-k_arr[ik]*u_arr[iu])
                         integs[lmin+il,1,ir,iu] += lpref*(k_arr[ik]-k_arr[ik-1])*(f_low+f_high)
                         f_low = f_high
     
