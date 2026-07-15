@@ -1027,7 +1027,59 @@ class BSpecTemplate():
         self.timers['analytic_fisher'] += time.time()-t_init
 
         return output
-    
+    def compute_ideal_fisher_2d_feat_res(self):
+        """
+        Compute the ideal Fisher matrix for the fNL-feat-res template with r and u collapsed into a single
+        combined (r,u) 'pair' index, rather than treating r as the only optimizable/matrix axis (with u
+        pre-summed internally, as in the ints_1d pathway used by _compute_fisher_derivatives). This requires
+        self.flXs_exp[-2], self.flXs_exp[-3] (shape (lmax+1, npol, N_r, N_u)) to already be computed, e.g. via
+        _prepare_templates() or optimize_radial_sampling_1d().
+
+        If the (r,u) pairs are taken to be the full outer product of self.r_arr and self.u_arr (as here), the
+        result is mathematically identical to the ints_1d pathway's ideal Fisher for 'fNL-feat-res' -- this
+        is a pure reindexing of the same double sum. The advantage of the pair-collapsed form is that the
+        returned matrix is indexed by (r,u) pair, giving direct access to e.g. the Fisher derivative summed
+        over r at fixed u (marginal importance of each u point), which is not otherwise accessible since the
+        ints_1d pathway sums over u internally before returning an (N_r, N_r) matrix.
+
+        Returns:
+            - deriv_matrix: (N_pairs, N_pairs) Fisher derivative matrix, pair-indexed (pair p = ir*N_u + iu)
+            - r_pairs, u_pairs: (N_pairs,) arrays giving the (r, u) value of each pair index
+        """
+        assert hasattr(self, 'flXs_exp'), "Must first compute flXs_exp, e.g. via _prepare_templates() or optimize_radial_sampling_1d()!"
+        omega = self.omega
+        kappa = self.feat_params['kres_cs']
+        prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
+        u_weights_m0 = self.u_weights*self.u_arr**(1j*omega-1.)
+        u_weights_m1 = self.u_weights*self.u_arr**(1j*omega-2.)
+        u_weights_m3 = self.u_weights*self.u_arr**(1j*omega-4.)*(1j*omega-2)
+        VM1 = np.asarray(2.*np.real(prefactor*u_weights_m3), order='C')
+        VM2 = np.asarray(2.*np.real(prefactor*3.*u_weights_m1), order='C')
+        VM3 = np.asarray(2.*np.real(prefactor*u_weights_m0), order='C')
+
+        # Collapse (r, u) into a single 'pair' axis via the full outer product of self.r_arr, self.u_arr.
+        # flXs_exp is C-contiguous with shape (lmax+1, npol, N_r, N_u), so reshaping the last two axes into
+        # one directly gives pair index p = ir*N_u + iu; np.repeat/np.tile give the matching r- and u-weight
+        # arrays under the same ordering.
+        N_r, N_u = self.N_r, self.N_u
+        flXs2_pairs = np.asarray(self.flXs_exp[-2].reshape(self.lmax+1, 1+2*self.pol, N_r*N_u), order='C')
+        flXs3_pairs = np.asarray(self.flXs_exp[-3].reshape(self.lmax+1, 1+2*self.pol, N_r*N_u), order='C')
+        weights_pairs = np.asarray(np.repeat(self.quad_weights_1d, N_u), order='C')
+        VM1_pairs = np.asarray(np.tile(VM1, N_r), order='C')
+        VM2_pairs = np.asarray(np.tile(VM2, N_r), order='C')
+        VM3_pairs = np.asarray(np.tile(VM3, N_r), order='C')
+        r_pairs = np.repeat(self.r_arr, N_u)
+        u_pairs = np.tile(self.u_arr, N_r)
+
+        [mus, w_mus] = p_roots(2*self.lmax+1)
+        legs = np.asarray([lpmn(0,self.lmax,mus[i])[0][0,self.lmin:] for i in range(len(mus))])
+
+        deriv_matrix = np.asarray(fisher_deriv_fNL_feat_res_2d(flXs2_pairs, flXs3_pairs, weights_pairs, VM1_pairs, VM2_pairs, VM3_pairs,
+                            np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
+                            legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+
+        return deriv_matrix, r_pairs, u_pairs
+
     ### NUMERATOR
     @_timer_func('numerator')
     def Bl_numerator(self, data, include_linear_term=True, verb=False, input_type='map', return_cubic=False):

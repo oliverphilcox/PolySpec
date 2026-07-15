@@ -955,6 +955,98 @@ cpdef double[:,::1] fisher_deriv_fNL_feat_res(double[:,:,:,::1] flXs2, double[:,
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
+cpdef double[:,::1] fisher_deriv_fNL_feat_res_2d(double[:,:,::1] flXs2, double[:,:,::1] flXs3, double[:] weights,
+                                                double[:] VM1, double[:] VM2, double[:] VM3,
+                                                double[:,:,::1] inv_Cl_mat, double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
+    """Compute the exact Fisher matrix for the fNL^{feat-res} template with r and u collapsed into a single
+    combined (r,u) 'pair' index, so the output is a pure function of (pair_i, pair_j) rather than (r,r') with
+    u,u' pre-summed internally as in fisher_deriv_fNL_feat_res. This allows joint r-u optimization and gives
+    the Fisher derivative directly w.r.t. each u point. flXs2, flXs3 are the k^-2, k^-3 radial integrals
+    evaluated at each pair (shape (lmax+1, npol, npairs)); VM1, VM2, VM3 are the real 2*Re(prefactor * group
+    u-weight) values evaluated at each pair's own u (shape (npairs,)); weights is the r^2 dr quadrature weight
+    at each pair's own r (shape (npairs,)). Structurally identical to fisher_deriv_fNL_feat_res, but with the
+    internal (iu,ju) sum removed since each pair already fixes u -- if the pairs are the full outer product of
+    an (r_arr, u_arr) tensor grid, weights and VM1/VM2/VM3 built via np.repeat/np.tile of the 1d r- and
+    u-arrays reproduce fisher_deriv_fNL_feat_res's result exactly after summing over all pairs."""
+
+    cdef int nl = lmax+1-lmin, npairs = flXs2.shape[2], npol = flXs2.shape[1], nmu = len(w_mus)
+    cdef int il, ip, jp, ipol, jpol, tid, imu
+    cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
+    cdef double[:,::1] deriv_matrix = np.zeros((npairs,npairs),dtype=np.float64)
+    cdef double[:,::1] zeta22 = np.zeros((nthreads,nl),dtype=np.float64)
+    cdef double[:,::1] zeta23 = np.zeros((nthreads,nl),dtype=np.float64)
+    cdef double[:,::1] zeta32 = np.zeros((nthreads,nl),dtype=np.float64)
+    cdef double[:,::1] zeta33 = np.zeros((nthreads,nl),dtype=np.float64)
+    cdef double pref = dpow(4.*M_PI,-1)/36.
+    cdef double acc, tmp22, tmp23, tmp32, tmp33
+    cdef double s22, s23, s32, s33
+    cdef double m11, m12, m13, m21, m22, m23, m31, m32, m33
+
+    for il in xrange(nl):
+        twol_arr[il] = (2.*il+2*lmin+1.)
+
+    for ip in prange(npairs, nogil=True, schedule='static', num_threads=nthreads):
+        tid = threadid()
+        for jp in xrange(ip,npairs):
+
+            for il in xrange(nl):
+                tmp22 = 0.
+                tmp23 = 0.
+                tmp32 = 0.
+                tmp33 = 0.
+                for ipol in xrange(npol):
+                    for jpol in xrange(npol):
+                        tmp22 = tmp22 + inv_Cl_mat[ipol,jpol,il+lmin]*flXs2[il+lmin,ipol,ip]*flXs2[il+lmin,jpol,jp]
+                        tmp23 = tmp23 + inv_Cl_mat[ipol,jpol,il+lmin]*flXs2[il+lmin,ipol,ip]*flXs3[il+lmin,jpol,jp]
+                        tmp32 = tmp32 + inv_Cl_mat[ipol,jpol,il+lmin]*flXs3[il+lmin,ipol,ip]*flXs2[il+lmin,jpol,jp]
+                        tmp33 = tmp33 + inv_Cl_mat[ipol,jpol,il+lmin]*flXs3[il+lmin,ipol,ip]*flXs3[il+lmin,jpol,jp]
+                zeta22[tid,il] = twol_arr[il]*tmp22
+                zeta23[tid,il] = twol_arr[il]*tmp23
+                zeta32[tid,il] = twol_arr[il]*tmp32
+                zeta33[tid,il] = twol_arr[il]*tmp33
+
+            m11 = 0.
+            m12 = 0.
+            m13 = 0.
+            m21 = 0.
+            m22 = 0.
+            m23 = 0.
+            m31 = 0.
+            m32 = 0.
+            m33 = 0.
+            for imu in xrange(nmu):
+                s22 = 0.
+                s23 = 0.
+                s32 = 0.
+                s33 = 0.
+                for il in xrange(nl):
+                    s22 = s22 + zeta22[tid,il]*legs[imu,il]
+                    s23 = s23 + zeta23[tid,il]*legs[imu,il]
+                    s32 = s32 + zeta32[tid,il]*legs[imu,il]
+                    s33 = s33 + zeta33[tid,il]*legs[imu,il]
+                m11 = m11 + w_mus[imu]*3.*s33*s33*s33
+                m12 = m12 + w_mus[imu]*3.*s32*s32*s33
+                m13 = m13 + w_mus[imu]*3.*s32*s32*s32
+                m21 = m21 + w_mus[imu]*3.*s23*s23*s33
+                m22 = m22 + w_mus[imu]*(1.*s22*s22*s33 + 2.*s22*s23*s32)
+                m23 = m23 + w_mus[imu]*3.*s22*s22*s32
+                m31 = m31 + w_mus[imu]*3.*s23*s23*s23
+                m32 = m32 + w_mus[imu]*3.*s22*s22*s23
+                m33 = m33 + w_mus[imu]*3.*s22*s22*s22
+
+            acc = (VM1[ip]*VM1[jp]*m11 + VM1[ip]*VM2[jp]*m12 + VM1[ip]*VM3[jp]*m13
+                 + VM2[ip]*VM1[jp]*m21 + VM2[ip]*VM2[jp]*m22 + VM2[ip]*VM3[jp]*m23
+                 + VM3[ip]*VM1[jp]*m31 + VM3[ip]*VM2[jp]*m32 + VM3[ip]*VM3[jp]*m33)
+
+            deriv_matrix[ip,jp] = pref*weights[ip]*weights[jp]*acc
+            if ip!=jp:
+                deriv_matrix[jp,ip] = deriv_matrix[ip,jp]
+
+    return deriv_matrix
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
 cpdef double[:,::1] fisher_deriv_fNL_eq(double[:,:,::1] plXs, double[:,:,::1] qlXs, double[:,:,::1] r1lXs, double[:,:,::1] r2lXs, double[:] weights, double[:,:,::1] inv_Cl_mat,
                                    double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
     """Compute the exact Fisher matrix for the fNL^{eq} template."""
