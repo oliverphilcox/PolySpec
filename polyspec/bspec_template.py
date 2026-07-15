@@ -1078,6 +1078,285 @@ class BSpecTemplate():
 
         return deriv_matrix, r_pairs, u_pairs
 
+    def _greedy_optimize_fisher_matrix(self, deriv_matrix, tolerance=1e-3, verb=False, label=''):
+        """
+        Generic greedy (Smith & Zaldarriaga 06) optimizer for an ideal Fisher derivative matrix. This is
+        index-agnostic -- it works identically whether the matrix is indexed by r alone (as in
+        optimize_radial_sampling_1d, which implements this same algorithm inline, template-by-template)
+        or by (r,u) pairs (as in optimize_ru_sampling): greedily selects a minimal subset of indices
+        (with optimal quadratic weights) that reproduces the full matrix's total Fisher information to
+        within 'tolerance' (relative).
+
+        Returns: inds (list of selected indices into the input array), w_opt (weights for those
+        indices), init_score (total Fisher of the unoptimized matrix), fish (total Fisher after
+        optimization).
+        """
+        N = len(deriv_matrix)
+        init_score = np.sum(deriv_matrix)
+        inds_init = np.arange(N)
+        inds = []
+
+        def _compute_score(w_vals, full_score=False):
+            if full_score:
+                return np.sum(G_mat), np.sum(np.outer(w_vals,w_vals)*deriv_matrix[inds][:,inds])
+            else:
+                return np.sum(G_mat)
+
+        if len(inds)!=0:
+            notinds = [i for i in np.arange(N) if i not in inds]
+            inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
+            G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
+            w_vals = (1+np.sum(inv_deriv@deriv_matrix[inds][:,notinds],axis=1))
+            score = _compute_score(w_vals)
+            if verb: print("Unoptimized relative score: %.2e"%(score/init_score))
+        else:
+            score = init_score
+            w_vals = []
+            G_mat = np.eye(0)
+
+        if score/init_score >= tolerance and (np.diag(G_mat)>0).all():
+            if len(inds)==0:
+                next_ind = np.argsort(np.sum(deriv_matrix,axis=1)**2/np.diag(deriv_matrix))[-1]
+            else:
+                next_ind = inds_init[notinds][np.argsort(np.sum(G_mat,axis=1)**2/np.diag(G_mat))[-1]]
+            inds.append(next_ind)
+            score_old = score
+
+            for iteration in range(len(inds), N):
+                inds[-1] = next_ind
+                notinds = [i for i in np.arange(N) if i not in inds]
+                try:
+                    inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
+                except np.linalg.LinAlgError:
+                    print("Singular matrix; exiting!")
+                    inds = inds[:-1]
+                    break
+                G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
+                w_vals = (1+np.sum(inv_deriv@deriv_matrix[inds][:,notinds],axis=1))
+                score = _compute_score(w_vals)
+                if verb: print("Iteration %d, relative score: %.2e"%(iteration, score/init_score))
+                if score<0:
+                    print("## Score is negative; this indicates a numerical error!")
+                    break
+                if score/init_score < tolerance:
+                    break
+                score_old = score
+                next_ind = inds_init[notinds][np.argsort(np.sum(G_mat,axis=1)**2/np.diag(G_mat))[-1]]
+                inds.append(next_ind)
+
+        if len(G_mat)==0:
+            raise Exception("Failed to converge; this indicates a bug!")
+
+        w_opt = np.asarray(w_vals.copy())
+        score, fish = _compute_score(w_opt, full_score=True)
+        if verb: print("Ideal %s Fisher: %.4e (initial), %.4e (optimized). Relative score: %.2e"%(label, init_score, fish, score/init_score))
+
+        return inds, w_opt, init_score, fish
+
+    def _build_and_optimize_ru_grid(self, r_init, r_quad_weights, u_min=0.01, u_safety_factor=15, pts_per_period=15, tolerance=1e-3, verb=False, label='fNL-feat-res (r,u)'):
+        """
+        Core (r,u) ragged-grid build + ideal Fisher computation + greedy prune, given an explicit
+        array of r points and their quadrature weights (r^2 dr convention). Factored out of
+        optimize_ru_sampling so a pre-thinned/localized r-candidate set (e.g. from
+        optimize_ru_sampling_staged), or a deliberately over-resolved grid (for a joint-convergence
+        check), can reuse the same pair-grid/Fisher/prune logic without going through the
+        raw-grid-from-reduce_r construction. Per-r u_arr density need not follow any fixed formula --
+        this only requires r_init (arbitrary, can repeat r values with different u ranges) and a
+        matching per-r u_max_r/N_u_r pair; the ragged-grid loop below is what currently derives those
+        from (u_safety_factor, pts_per_period), but nothing downstream assumes that particular rule.
+
+        Returns: r_opt, u_opt, weights_opt, init_score. init_score is deriv_matrix.sum() -- the total
+        ideal Fisher of the *unpruned* input grid -- so calling this with tolerance=1.0 (skip pruning)
+        and comparing init_score across grids of different density is a direct joint (r,u) convergence
+        check.
+        """
+        t_init = time.time()
+
+        omega = self.omega
+        kappa = self.feat_params['kres_cs']
+        npol = 1+2*self.pol
+        period = 2.*np.pi/omega
+
+        r_init = np.asarray(r_init)
+        r_quad_weights = np.asarray(r_quad_weights)
+        N_r = len(r_init)
+
+        # Precompute Bessel functions once, over the full r-range
+        max_kr = max(self.k_arr)*max(r_init)
+        x_arr = np.asarray(list(np.arange(0,self.lmax*2,0.01))+list(np.arange(self.lmax*2,max_kr,0.1)),dtype=np.float64)
+        jlxs = np.zeros((self.lmax-self.lmin+1,len(x_arr)),dtype=np.float64,order='C')
+        compute_bessel(x_arr,self.lmin,self.lmax,jlxs,self.base.nthreads)
+        jlkr_all = interpolate_jlkr(x_arr, self.k_arr, r_init, jlxs, self.base.nthreads)
+
+        # Build the ragged (r,u) grid, computing legs per-r (each r needs its own u_arr)
+        r_list, u_list, wt_list, uwt_list = [], [], [], []
+        flXs_pieces = {p: [] for p in [-3,-2,-1,0,1]}
+        for ir in range(N_r):
+            r_val = r_init[ir]
+            u_max_r = u_safety_factor*r_val/self.lmin
+            N_u_r = max(3, int(pts_per_period*np.log(u_max_r/u_min)/period)+1)
+            u_arr_r = np.geomspace(u_min, u_max_r, N_u_r)
+
+            log_u = np.log(u_arr_r)
+            dlnu = np.zeros(N_u_r)
+            dlnu[:-1] += 0.5*np.diff(log_u)
+            dlnu[1:] += 0.5*np.diff(log_u)
+            du_r = dlnu*u_arr_r
+
+            jlkr_r = np.ascontiguousarray(jlkr_all[:,[ir],:])
+            for p in [-3,-2,-1,0,1]:
+                out = np.zeros((self.lmax+1, npol, 1, N_u_r), dtype=np.float64, order='C')
+                q_integral_exp(self.k_arr, float(p), u_arr_r, self.Tl_arr, jlkr_r, self.lmin, self.lmax, self.base.nthreads, out)
+                flXs_pieces[p].append(out[:,:,0,:])
+
+            r_list.append(np.full(N_u_r, r_val))
+            u_list.append(u_arr_r)
+            wt_list.append(np.full(N_u_r, r_quad_weights[ir]))
+            uwt_list.append(du_r.astype(np.complex128)*u_arr_r**(1j*omega))
+
+        r_pairs = np.concatenate(r_list)
+        u_pairs = np.concatenate(u_list)
+        weights_pairs = np.asarray(np.concatenate(wt_list), order='C')
+        u_weight_pairs = np.concatenate(uwt_list)
+        N_pairs = len(r_pairs)
+        if verb: print("# Ragged (r,u) grid: N_r = %d, N_pairs = %d"%(N_r, N_pairs))
+
+        flXs_full = {p: np.asarray(np.concatenate(flXs_pieces[p], axis=-1), order='C') for p in [-3,-2,-1,0,1]}
+
+        prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
+        coeff1 = 1./(1j*omega*(1j*omega-1)*(1j*omega-3))
+        coeff2 = 1./(1j*omega*(1j*omega-1))
+        coeff3 = 1./(1j*omega)
+        VQ1 = np.asarray(2.*np.real(prefactor*(3.*coeff1)*u_weight_pairs), order='C')
+        VQ2 = np.asarray(2.*np.real(prefactor*(24.*coeff1+6.*coeff2)*u_weight_pairs), order='C')
+        VQ3 = np.asarray(2.*np.real(prefactor*(18.*coeff1+6.*coeff2)*u_weight_pairs), order='C')
+        VQ4 = np.asarray(2.*np.real(prefactor*(36.*coeff1+15.*coeff2+3.*coeff3)*u_weight_pairs), order='C')
+
+        [mus, w_mus] = p_roots(2*self.lmax+1)
+        legs = np.asarray([lpmn(0,self.lmax,mus[i])[0][0,self.lmin:] for i in range(len(mus))])
+
+        if verb: print("# Computing ideal Fisher matrix on the ragged grid (%d x %d)"%(N_pairs,N_pairs))
+        deriv_matrix = np.asarray(fisher_deriv_fNL_feat_res_2d(flXs_full[-3], flXs_full[-2], flXs_full[-1], flXs_full[0], flXs_full[1],
+                            weights_pairs, VQ1, VQ2, VQ3, VQ4,
+                            np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
+                            legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+
+        inds, w_opt, init_score, fish = self._greedy_optimize_fisher_matrix(deriv_matrix, tolerance=tolerance, verb=verb, label=label)
+        if verb: print("\nScore threshold met with %d of %d pairs"%(len(inds), N_pairs))
+
+        r_opt = r_pairs[inds]
+        u_opt = u_pairs[inds]
+        weights_opt = w_opt*weights_pairs[inds]
+
+        print("\n%s optimization complete after %.2f seconds (%d -> %d pairs)"%(label, time.time()-t_init, N_pairs, len(inds)))
+
+        return r_opt, u_opt, weights_opt, init_score
+
+    def optimize_ru_sampling(self, reduce_r=1, u_min=0.01, u_safety_factor=15, pts_per_period=15, tolerance=1e-3, verb=False):
+        """
+        Jointly optimize the (r,u) sampling for the fNL-feat-res template, generalizing
+        optimize_radial_sampling_1d to the pair-collapsed architecture. This is necessary because the
+        'good' u range for a given r scales with r itself -- the u-integral for a leg only decays once u
+        exceeds ~r/l_min for the dominant l=l_min contribution (empirically confirmed: convergence for a
+        single r happens once u_max reaches ~10-20x r/l_min, independent of omega) -- so a single, shared
+        u_arr across all r (as used by the ints_1d/ints_2d-with-full-outer-product pathway) is wasteful:
+        small r never needs a large u_max, while large r genuinely does.
+
+        Step 1: build an initial, ragged (r,u) pair grid -- the same fiducial r_raw construction as
+        optimize_radial_sampling_1d, but with u_arr(r) = geomspace(u_min, u_safety_factor*r/lmin, N_u(r)),
+        N_u(r) chosen for pts_per_period samples per u^{i*omega} oscillation period in ln(u). Note this
+        u_max(r)/N_u(r) rule is just a convenient, empirically-motivated *starting point* -- the grid it
+        produces is already non-regular (ragged: more u points at large r than small r), and there is no
+        requirement that production use exactly this rule; any initial (r,u) point set can be fed to
+        _build_and_optimize_ru_grid directly. What matters is verifying the initial grid is fine enough,
+        jointly in (r,u), that the ideal Fisher has converged -- see the joint-convergence check
+        recommended alongside this method (compare init_score across independently-refined r- and
+        u-density before trusting the pruned result).
+        Step 2: compute the ideal Fisher matrix directly on this ragged pair grid (no shared-u tensor
+        product, so N_pairs = sum_r N_u(r), not N_r * max(N_u)).
+        Step 3: greedily prune via _greedy_optimize_fisher_matrix (the same Smith & Zaldarriaga algorithm
+        as optimize_radial_sampling_1d), now operating on (r,u) pairs instead of r alone.
+
+        This does an O(N_pairs^2) dense Fisher build, which only stays tractable for N_r up to a few
+        tens (N_pairs up to a few thousand); it stalls well before N_pairs~2e4 (empirically, this did
+        not converge within 10 minutes at N_r=52). For a fine production r-grid (e.g. reduce_r~2),
+        use optimize_ru_sampling_staged instead.
+
+        Returns:
+            - r_opt, u_opt: (N_pairs_opt,) arrays of the optimized (r,u) points
+            - weights_opt: (N_pairs_opt,) their combined (r^2 dr times quadratic-optimization) weights
+            - ideal_fisher: total ideal Fisher (sum over the full, unoptimized ragged grid)
+        """
+        assert 'fNL-feat-res' in self.templates, "optimize_ru_sampling is only implemented for fNL-feat-res!"
+
+        # Fiducial r-grid: same construction as optimize_radial_sampling_1d
+        r_raw = np.asarray(list(np.arange(1,self.r_star*0.95,50*reduce_r))+list(np.arange(self.r_star*0.95,self.r_hor*1.05,2.5*reduce_r))+list(np.arange(self.r_hor*1.05,self.r_hor+5000,50*reduce_r)))
+        r_init = 0.5*(r_raw[1:]+r_raw[:-1])
+        r_quad_weights = r_init**2*np.diff(r_raw)
+        if verb: print("# Fiducial r-grid: N_r = %d"%len(r_init))
+
+        return self._build_and_optimize_ru_grid(r_init, r_quad_weights, u_min=u_min, u_safety_factor=u_safety_factor, pts_per_period=pts_per_period, tolerance=tolerance, verb=verb, label='fNL-feat-res (r,u)')
+
+    def optimize_ru_sampling_staged(self, reduce_r_coarse=80, reduce_r_fine=2, refine_window=1.5, u_min=0.01, u_safety_factor=15, pts_per_period=15, coarse_tolerance=1e-3, tolerance=1e-3, verb=False):
+        """
+        Two-stage version of optimize_ru_sampling for when the target (fine, production-resolution)
+        r-grid is too large for a direct joint (r,u) Fisher build+prune. optimize_ru_sampling's dense
+        Fisher build costs O(N_pairs^2); this was empirically found to stall (not converge within 10
+        minutes) already at N_pairs~2e4 (N_r=52, reduce_r=20), well short of the coarsen=2 production
+        target (N_r in the hundreds+). This method avoids ever building that full-size dense matrix.
+
+        Stage A: run the existing optimize_ru_sampling at a coarse r-grid (reduce_r_coarse -- the same
+        scale already validated to work directly, e.g. reduce_r=80 giving N_r=14, N_pairs~5e3) to find
+        which r *regions* carry the bulk of the Fisher information (5339->18 pairs, 99.9% retained, was
+        the benchmark result at this scale).
+
+        Stage B: build the *fine* r-grid (reduce_r_fine, the actual target resolution), but keep only
+        fine-grid points within +/- refine_window * (local coarse-grid spacing) of each distinct r
+        selected by Stage A. This keeps the Stage-B candidate set small (localized around a handful of
+        important regions, not spanning the whole fine grid), so the joint Fisher build + greedy prune
+        stays in the already-validated tractable regime, now at full target r-resolution.
+
+        Caveat: this assumes Fisher information in r is concentrated in a few localized regions (well
+        supported by Stage-A's own strong compression, and by the physical picture -- last scattering
+        and reionization/ISW shells -- but not independently proven optimal for the fine grid). Treat
+        the result as a good, cheap, production-usable approximation, not a certified global optimum --
+        confirm with a joint (r,u) convergence check (e.g. rerun Stage B with a larger refine_window
+        and/or higher pts_per_period/u_safety_factor and check init_score is stable) before trusting it
+        at full scale, per the same logic as optimize_ru_sampling's docstring.
+
+        Returns: r_opt, u_opt, weights_opt, init_score (init_score is Stage B's ragged-candidate-set
+        total, i.e. restricted to the localized candidate region, not the full fine grid).
+        """
+        assert 'fNL-feat-res' in self.templates, "optimize_ru_sampling_staged is only implemented for fNL-feat-res!"
+
+        if verb: print("## Stage A: coarse (r,u) optimization to find important r regions (reduce_r=%d)"%reduce_r_coarse)
+        r_opt_c, u_opt_c, w_opt_c, fisher_c = self.optimize_ru_sampling(reduce_r=reduce_r_coarse, u_min=u_min, u_safety_factor=u_safety_factor, pts_per_period=pts_per_period, tolerance=coarse_tolerance, verb=verb)
+        r_important = np.unique(r_opt_c)
+        if verb: print("# Stage A selected %d distinct r regions"%len(r_important))
+
+        if verb: print("\n## Stage B: building fine r-grid (reduce_r=%d) and localizing candidates near Stage-A regions"%reduce_r_fine)
+        r_raw_fine = np.asarray(list(np.arange(1,self.r_star*0.95,50*reduce_r_fine))+list(np.arange(self.r_star*0.95,self.r_hor*1.05,2.5*reduce_r_fine))+list(np.arange(self.r_hor*1.05,self.r_hor+5000,50*reduce_r_fine)))
+        r_fine = 0.5*(r_raw_fine[1:]+r_raw_fine[:-1])
+        r_fine_quad_weights = r_fine**2*np.diff(r_raw_fine)
+        if verb: print("# Fine r-grid: N_r = %d"%len(r_fine))
+
+        # Local window width at each Stage-A r: use the *coarse* grid's local spacing as the window scale
+        r_raw_coarse = np.asarray(list(np.arange(1,self.r_star*0.95,50*reduce_r_coarse))+list(np.arange(self.r_star*0.95,self.r_hor*1.05,2.5*reduce_r_coarse))+list(np.arange(self.r_hor*1.05,self.r_hor+5000,50*reduce_r_coarse)))
+        coarse_spacing = np.diff(r_raw_coarse)
+        coarse_centers = 0.5*(r_raw_coarse[1:]+r_raw_coarse[:-1])
+
+        mask = np.zeros(len(r_fine), dtype=bool)
+        for r_val in r_important:
+            i_c = np.argmin(np.abs(coarse_centers-r_val))
+            window = refine_window*coarse_spacing[i_c]
+            mask |= (np.abs(r_fine-r_val) <= window)
+        r_candidate = r_fine[mask]
+        r_candidate_weights = r_fine_quad_weights[mask]
+        if verb: print("# Candidate fine-r set near Stage-A regions: N_r = %d (of %d fine points)"%(len(r_candidate), len(r_fine)))
+
+        if verb: print("\n## Stage B: joint (r,u) Fisher build + prune on the localized candidate set")
+        return self._build_and_optimize_ru_grid(r_candidate, r_candidate_weights, u_min=u_min, u_safety_factor=u_safety_factor, pts_per_period=pts_per_period, tolerance=tolerance, verb=verb, label='fNL-feat-res (r,u) [staged]')
+
     ### NUMERATOR
     @_timer_func('numerator')
     def Bl_numerator(self, data, include_linear_term=True, verb=False, input_type='map', return_cubic=False):
