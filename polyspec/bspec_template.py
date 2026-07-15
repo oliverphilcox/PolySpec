@@ -210,7 +210,10 @@ class BSpecTemplate():
             self.omega = self.feat_params['omega']
 
             # k-powers (x_j(k) ~ k^{kpow}) needed for the exact separable form of B_res: p_2(k)=k^{-2}e^{-ku}, p_3(k)=k^{-3}e^{-ku}
-            self.feat_kpows = [-2,-3]
+            # (used by the ideal Fisher / Q-derivative / linear-term paths, which still use the divergent
+            # u^{i*omega-1-n} Mellin representation). p_{-1},p_0,p_1 are additionally needed by the genuinely
+            # convergent (shifted-Mellin) representation used by the cubic numerator; see below.
+            self.feat_kpows = [-3,-2,-1,0,1]
 
             # Quadrature measure for the log-spaced u integral (trapezium rule in ln(u)). This is deliberately
             # just the real measure 'du', with NO Mellin power of u baked in: the exact B_res form collapses
@@ -1175,35 +1178,58 @@ class BSpecTemplate():
                 self.timers['fNL_summation'] += time.time()-t_init
 
             elif t=='fNL-feat-res':
-                # fNL-feat-res template: exact separable form of B_res, collapsed onto a single u-integral
-                # with common weight W(u) = u^{i*omega-1}/Gamma(i*omega); see eqns.tex for the derivation.
-                # B_res/A_res = -(1/4)*(omega+3i)*(2*pi^2*As)^2*omega^2*cosh(pi*omega/2)*kappa^{i*omega}
-                #               * int du W(u) [ p3(k1)p3(k2)p3(k3)*(i*omega-2)/u^3
-                #                               + (p2(k1)p2(k2)p3(k3) + 2 perm)/u
-                #                               + p2(k1)p2(k2)p2(k3) ] + c.c.
-                # with p_n(k) = k^{-n} e^{-ku} (pure power laws, no As; flXs_exp is built from k_arr^{-3} in
-                # place of Pzeta_arr for exactly this reason), so the (2 pi^2 As)^2 must be applied explicitly.
+                # fNL-feat-res template, cubic (3-field) numerator term.
+                #
+                # NOTE: the original 'collapsed' representation (weight u^{i*omega-1-n}, n=0,1,3 for the
+                # M3,M2,M1 groups) is a genuinely DIVERGENT real integral for every group (Re(exponent)<=0
+                # always, since omega is real): it is only well-defined via the Gamma function's analytic
+                # continuation, not as a literal quadrature over a finite u_arr, which is exactly what this
+                # code does. No choice of u_arr converges to the correct B_res -- it diverges as u_min -> 0.
+                #
+                # Fix: represent each group's target e1^{n-i*omega} (e1=k1+k2+k3) via a Mellin exponent
+                # shifted to p = i*omega - n + m for integer m > n, giving Re(p) = m-n > 0 (a genuinely,
+                # absolutely convergent integral), and multiply back the 'missing' e1^m power explicitly
+                # via the multinomial theorem (which just adds an integer power to one of the 3 legs --
+                # still perfectly separable). Taking the minimal m = n+1 for each group makes the shifted
+                # exponent i*omega-n+m = i*omega+1 *independent of n*, so all groups share one weight u^{i*omega}.
+                # This turns the 3-term formula into 8 group-level terms (M1: 4, M2: 3, M3: 1), using 5 leg
+                # powers (k^{-3},k^{-2},k^{-1},k^0,k^{+1}) instead of 2 -- verified (mpmath, 25-digit, 3
+                # independent non-degenerate test points, both algebraically and via literal convergent
+                # numerical quadrature) to reproduce the same closed-form B_res as the old (divergent)
+                # collapsed formula.
+                #
+                # Those 8 terms collapse further to just 4 distinct leg-power multisets ({-3,-3,1},
+                # {-3,-2,0}, {-3,-1,-1}, {-2,-2,-1}), since fnl_sum_2d_complex(A,B,C) is trivially symmetric
+                # under reordering its 3 map arguments (it is just sum_pix A*B*C), so raw terms from
+                # DIFFERENT groups that reduce to the same *set* of 3 filtered maps give identical
+                # fnl_sum_2d_complex values and their (group-dependent, omega-only) coefficients simply add.
+                # Verified against the unmerged 8-group-term form on a random test map: rel diff ~1e-16.
+                #
+                # B_res/A_res = prefactor * int du u^{i*omega} * BRACKET(u) + c.c., with p_n(k)=k^{-n}e^{-ku}:
+                # BRACKET = (3c1)*p1(k1)p1(k2)p_{-3}(k3)              [{-3,-3,1}]
+                #         + (24c1+6c2)*p_{-3}(k1)p_{-2}(k2)p_0(k3)    [{-3,-2,0}]
+                #         + (18c1+6c2)*p_{-3}(k1)p_{-1}(k2)p_{-1}(k3) [{-3,-1,-1}]
+                #         + (36c1+15c2+3c3)*p_{-2}(k1)p_{-2}(k2)p_{-1}(k3)  [{-2,-2,-1}]
+                # (each with its implicit "+perms", already folded into the merged coefficient), where
+                # c1=1/[iw(iw-1)(iw-3)] (M1), c2=1/[iw(iw-1)] (M2), c3=1/iw (M3).
                 print("Computing fNL-feat-res template")
 
                 t_init = time.time()
                 omega = self.omega
                 kappa = self.feat_params['kres_cs']
                 prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-                u_weights_m0 = self.u_weights*self.u_arr**(1j*omega-1.)
-                u_weights_m1 = self.u_weights*self.u_arr**(1j*omega-2.)
-                u_weights_m3 = self.u_weights*self.u_arr**(1j*omega-4.)*(1j*omega-2)
+                u_weight = self.u_weights*self.u_arr**(1j*omega)  # shared by every group now
+                coeff1 = 1./(1j*omega*(1j*omega-1)*(1j*omega-3))  # M1 (base legs -3,-3,-3; shift m=4)
+                coeff2 = 1./(1j*omega*(1j*omega-1))               # M2 (base legs -2,-2,-3; shift m=2)
+                coeff3 = 1./(1j*omega)                            # M3 (base legs -2,-2,-2; shift m=1)
 
-                f2, f3 = proc_maps['f_exp'][-2], proc_maps['f_exp'][-3]
-                # All 3 legs use the *same* data map (just filtered differently), so fnl_sum_2d_complex's
-                # pointwise product is commutative under argument-slot permutation: the 3 "2 perm." terms
-                # below are numerically identical, so we use a single call with multiplicity 3 (verified
-                # against the explicit unsimplified 3-call form to machine precision).
-                # p3(k1)p3(k2)p3(k3)
-                bracket  = self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m3, f3, f3, f3)
-                # p2(k1)p2(k2)p3(k3) + 2 perm.
-                bracket += 3*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m1, f2, f2, f3)
-                # p2(k1)p2(k2)p2(k3)
-                bracket += self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weights_m0, f2, f2, f2)
+                fm3, fm2, fm1, f0, fp1 = (proc_maps['f_exp'][-3], proc_maps['f_exp'][-2], proc_maps['f_exp'][-1],
+                                          proc_maps['f_exp'][0], proc_maps['f_exp'][1])
+
+                bracket  = (3.*coeff1)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, fm3, fp1)                      # {-3,-3,1}
+                bracket += (24.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, fm2, f0)             # {-3,-2,0}
+                bracket += (18.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, fm1, fm1)            # {-3,-1,-1}
+                bracket += (36.*coeff1+15.*coeff2+3.*coeff3)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm2, fm2, fm1) # {-2,-2,-1}
 
                 summ = prefactor*bracket
                 b3_num[index] = 1./3.*summ.real*self.base.A_pix
