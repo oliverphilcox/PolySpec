@@ -2,7 +2,6 @@
 ## This module contains the bispectrum template estimation code
 
 import numpy as np
-import os
 import time
 from scipy.special import p_roots, lpmn
 from .cython.k_integrals import *
@@ -1164,12 +1163,9 @@ class BSpecTemplate():
     def _feat_ideal_mu(self):
         """Gauss-Legendre mu quadrature + inv-Cl for the ideal Fisher (param-independent). The integrand
         (product of three degree<=lmax Legendre polys) has degree <=3*lmax, so ceil((3*lmax+1)/2) nodes are
-        exact. Returns (inv_Cl_mat, legs, w_mus). FEAT_NMU_FRAC (default 1.0) scales the node count down for
-        a speed/accuracy test -- the integrand is then only approximately integrated (B1 knob)."""
+        exact. Returns (inv_Cl_mat, legs, w_mus). (n_mu is NOT reducible: halving it gave a 61% error --
+        the integrand is genuinely degree ~3*lmax and undersampling aliases catastrophically.)"""
         n_mu = int(np.ceil((3*self.lmax+1)/2.))
-        frac = float(os.environ.get('FEAT_NMU_FRAC', '1.0'))
-        if frac != 1.0:
-            n_mu = max(2, int(np.ceil(n_mu*frac)))
         [mus, w_mus] = p_roots(n_mu)
         legs = np.ascontiguousarray(np.asarray([lpmn(0,self.lmax,mus[i])[0][0,self.lmin:] for i in range(len(mus))]))
         inv_Cl_mat = np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat, order='C')
