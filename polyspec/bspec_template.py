@@ -1102,8 +1102,8 @@ class BSpecTemplate():
         args = (np.ascontiguousarray(legre), np.ascontiguousarray(legim), np.ascontiguousarray(weights_pairs),
                 np.ascontiguousarray(Vgre), np.ascontiguousarray(Vgim), term_group, term_slots, nslot,
                 inv_Cl_mat, legs, np.ascontiguousarray(w_mus), self.lmin, self.lmax, self.base.nthreads)
-        # The routine BLAS-projects (dgemm) inside a prange over pairs, so pin BLAS to 1 thread to avoid
-        # nesting the BLAS thread pool inside the pair-parallel threads (oversubscription).
+        # Inline projection (memory-optimal: per-thread cache-resident zbuf/Sbuf). A tiled BLAS-3 dgemm was
+        # tried and is ~1.8x SLOWER -- the projection is memory-bandwidth bound, not compute-bound.
         try:
             from threadpoolctl import threadpool_limits
             with threadpool_limits(limits=1, user_api='blas'):
