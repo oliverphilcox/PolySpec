@@ -1473,6 +1473,71 @@ class BSpecTemplate():
                 leg = leg_re[kp_s] if t_s=='re' else leg_im[kp_s]
                 Qs_obs[index] += self._transform_maps(np.ascontiguousarray(inner), leg, wnode)
 
+    def _feat_q_plan(self):
+        """Scheme-fixed plan for the batched MC-Fisher Q-derivative with SHARED outer SHTs. Returns
+        (products, tuples_by_prod, outers) where `products` is the list of DISTINCT 2-leg product factors
+        ((kp_a,type_a),(kp_b,type_b)) whose map SHT is param-independent, `tuples_by_prod[j]` lists the
+        (key, outer=(kp,type), fr, fi) contributions of product j, and `outers` the distinct outer legs.
+        Cached (depends only on scheme via recipe keys + kpows)."""
+        if getattr(self, '_feat_q_plan_cache', None) is not None:
+            return self._feat_q_plan_cache
+        expansion = [(('re','re','re'), 1., 0.), (('re','im','im'), -1., 0.),
+                     (('im','re','im'), -1., 0.), (('im','im','re'), -1., 0.),
+                     (('re','re','im'), 0., -1.), (('re','im','re'), 0., -1.),
+                     (('im','re','re'), 0., -1.), (('im','im','im'), 0., 1.)]
+        products = []; prod_index = {}; tuples_by_prod = {}; outers = set()
+        for key in self.feat_recipe:
+            for types, fr, fi in expansion:
+                for s in range(3):
+                    o1, o2 = [j for j in range(3) if j != s]
+                    pr = tuple(sorted([(key[o1], types[o1]), (key[o2], types[o2])]))
+                    if pr not in prod_index:
+                        prod_index[pr] = len(products); products.append(pr); tuples_by_prod[prod_index[pr]] = []
+                    outer = (key[s], types[s])
+                    tuples_by_prod[prod_index[pr]].append((key, outer, fr, fi))
+                    outers.add(outer)
+        self._feat_q_plan_cache = (products, tuples_by_prod, sorted(outers))
+        return self._feat_q_plan_cache
+
+    def _feat_q_batch(self, Qs, Fexp_maps, radial_index, params):
+        """BATCHED fNL-feat-res Q-derivative for many (omega,kappa), SHARING the outer SHTs. Each distinct
+        2-leg product map is SHT'd ONCE (param-independent) and scattered, in harmonic space, into each
+        param's per-outer accumulator (only the per-node real coefficient coeff=fr*Re(cc)+fi*Im(cc),
+        cc=pref0 kappa^{iw} gamma feat_W, is param-dependent). Then one radial_sum per (param,outer).
+        Accumulates into Qs (shape (2, nparam, npol, nlm)). Because SHT(sum coeff*P) is only reordered
+        (not changed) vs sum coeff*SHT(P), results match the per-param _feat_q_deriv path to the SHT
+        round-off floor (~1e-13), not bitwise. Holds nparam*len(outers) harmonic accumulators."""
+        products, tuples_by_prod, outers = self._feat_q_plan()
+        kpows = self.feat_kpows; N_t = self.N_t
+        rw = self.r_weights['fNL-feat-res'][radial_index]
+        wnode = np.ascontiguousarray((2./3.)*rw*np.ones(N_t, dtype=np.float64))
+        leg_re = {kp: np.asarray(self.flXs_exp_re[kp][:,:,radial_index,:], order='C') for kp in kpows}
+        leg_im = {kp: np.asarray(self.flXs_exp_im[kp][:,:,radial_index,:], order='C') for kp in kpows}
+        for index in [0, 1]:
+            Mre = {kp: np.ascontiguousarray(Fexp_maps[kp][index,:,0,:].real) for kp in kpows}
+            Mim = {kp: np.ascontiguousarray(Fexp_maps[kp][index,:,0,:].imag) for kp in kpows}
+            _themap = lambda kp, typ: (Mre[kp] if typ == 're' else Mim[kp])
+            # per-param cc[key] = pref0 kappa^{iw} gamma_key feat_W  (the ONLY (omega,kappa) dependence)
+            ccs = []
+            for (om, ka) in params:
+                self.set_feat_params(om, ka)
+                C = self._feat_prefactor()
+                ccs.append({key: C*self.feat_recipe[key]*self.feat_W for key in self.feat_recipe})
+            inner_lm = [dict() for _ in params]   # ip -> {outer: (N_t, nlm) complex}
+            for j, (fa, fb) in enumerate(products):
+                Pj = _themap(fa[0], fa[1])*_themap(fb[0], fb[1])           # (N_t, npix), shared
+                PLj = np.asarray(self.base.to_lm_vec(Pj, lmax=self.lmax)[:, self.lminfilt], order='C')  # shared SHT
+                for (key, outer, fr, fi) in tuples_by_prod[j]:
+                    for ip in range(len(params)):
+                        cc = ccs[ip][key]
+                        coeff = fr*cc.real + fi*cc.imag                    # (N_t,) real
+                        contrib = coeff[:, None]*PLj
+                        inner_lm[ip][outer] = contrib if outer not in inner_lm[ip] else inner_lm[ip][outer] + contrib
+            for ip in range(len(params)):
+                for outer, ilm in inner_lm[ip].items():
+                    leg = leg_re[outer[0]] if outer[1] == 're' else leg_im[outer[0]]
+                    Qs[index, ip] += self.utils.radial_sum(np.ascontiguousarray(ilm), wnode, leg)
+
     def _build_and_optimize_ru_grid(self, r_init, r_quad_weights, u_min=0.01, u_safety_factor=15, pts_per_period=15, tolerance=1e-3, verb=False, label='fNL-feat-res (r,u)'):
         """
         Core (r,u) ragged-grid build + ideal Fisher computation + greedy prune, given an explicit
@@ -2692,10 +2757,9 @@ class BSpecTemplate():
             Qs = np.zeros((2, nparam, 1+2*self.pol, np.sum(self.lfilt)), dtype=np.complex128, order='C')
             for radial_index in range(self.N_r):
                 if verb and radial_index == 0: print("Creating F[exp] maps (shared across params)")
-                Fexp_maps = self._filter_pair(Uinv_a_lms, 'F_exp', radial_index)   # SHARED SHTs
-                for ip, (om, ka) in enumerate(params):
-                    self.set_feat_params(om, ka)
-                    self._feat_q_deriv(Qs[:, ip], Fexp_maps, radial_index)
+                Fexp_maps = self._filter_pair(Uinv_a_lms, 'F_exp', radial_index)   # SHARED filtering SHTs
+                # SHARED outer SHTs: each distinct 2-leg product is transformed once, recombined per param
+                self._feat_q_batch(Qs, Fexp_maps, radial_index, params)
             # S^-1 / m-weight each observable (explicit loop over nparam; _weight_Q_maps only spans total_size)
             if weighting == 'Ainv' and verb: print("Applying S^-1 weighting to output")
             for findex in range(2):
