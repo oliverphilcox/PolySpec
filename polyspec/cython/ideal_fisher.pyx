@@ -2,10 +2,12 @@
 
 from __future__ import print_function
 import numpy as np
+import os
 cimport numpy as np
 cimport cython
 from libc.math cimport M_PI, sqrt, pow as dpow
 from cython.parallel import prange, threadid
+from scipy.linalg.cython_blas cimport dgemm   # fast BLAS (OpenBLAS/MKL) for the mu-projection
 
 cdef extern from "complex.h" nogil:
     double creal(double complex)
@@ -1154,6 +1156,262 @@ cpdef double[:,::1] fisher_deriv_fNL_feat_res_2d(double[:,:,::1] flXsm3, double[
                 deriv_matrix[jp,ip] = deriv_matrix[ip,jp]
 
     return deriv_matrix
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cpdef double[:,::1] fisher_deriv_fNL_feat_res_2d_complex(double[:,:,:,::1] legre, double[:,:,:,::1] legim,
+                        double[:] weights, double[:,::1] Vgre, double[:,::1] Vgim,
+                        int[::1] term_group, int[:,::1] term_slots, int nslot,
+                        double[:,:,::1] inv_Cl_mat, double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
+    """Complex ideal-Fisher derivative for fNL-feat-res (compressed exp-sum rep, sm3 & sm1).
+    legre/legim: (nslot=5, lmax+1, npol, npairs) real/imag parts of the complex legs k^{kpow}e^{-k u}
+      at complex nodes; slot 0..4 = kpow -3,-2,-1,0,+1. weights: per-pair r-quadrature weight.
+    Vgre/Vgim: (ngroup, npairs) complex per-pair group weights = pref0*kappa^{iw}*W_node*gamma_g/n_ord_g.
+    term_group[nterm], term_slots[nterm,3]: each distinct ordered leg-triple (slot indices) of every group,
+      tagged with its group index (so the 1/n_ord is already folded into Vg).
+    The real reduced bispectrum is b=2Re[Z], so F = 2Re<Z,Z> + 2<Z,Z_bar> (symmetric bilinear form):
+      <Z,Z>:   s_ab = sum_l (2l+1) invCl leg_a[ip] leg_b[jp] P_l(mu);      weight Vg[gA,ip] Vg[gB,jp].
+      <Z,Zbar>: leg_b[jp] -> conj, and Vg[gB,jp] -> conj.
+    deriv[ip,jp] = (1/48pi) w[ip] w[jp] (2 Re m_ZZ + 2 Re m_ZZbar); summing gives the ideal Fisher.
+    Verified vs brute force (FEAT_NOTES Session 9/9b)."""
+
+    cdef int nl = lmax+1-lmin, npairs = legre.shape[3], npol = legre.shape[2], nmu = len(w_mus)
+    cdef int nterm = term_group.shape[0], nsp = nslot*nslot, nrow = 4*nslot*nslot
+    cdef int il, ip, jp, ipol, jpol, tid, imu, a, b, cp, tA, tB, gA, gB, i0,i1,i2,j0,j1,j2, c00,c11,c22
+    cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
+    cdef double[:,::1] deriv_matrix = np.zeros((npairs,npairs),dtype=np.float64)
+    # per-thread scratch: compact zeta buffer (rows 0..nrow-1 = ZZr,ZZi,ZBr,ZBi each nsp slot-pairs) x nl,
+    # and its BLAS projection S = zeta @ legs^T (nrow x nmu). Allocated at the nslot=5 max (4*25=100 rows).
+    cdef double[:,:,::1] zbuf = np.zeros((nthreads,4*25,nl),dtype=np.float64)
+    cdef double[:,:,::1] Sbuf = np.zeros((nthreads,4*25,nmu),dtype=np.float64)
+    cdef double prefc = 1.0/(48.0*M_PI)
+    cdef double ic, ar, ai, br, bi, zzr, zzi, zbr, zbi, tl
+    cdef double p12r,p12i,Pr,Pi, Pbr,Pbi, VAr,VAi,VBr,VBi, vr,vi, vbr_,vbi_
+    cdef double accZZr, accZBr, mZZr, mZBr
+    cdef double s00r,s00i,s11r,s11i,s22r,s22i, b00r,b00i,b11r,b11i,b22r,b22i
+    # dgemm (Fortran/col-major) computes S[row,mu]=sum_l zbuf[row,l] legs[mu,l] as one matmul per (ip,jp):
+    # row-major legs(nmu x nl)=col-major(nl x nmu); op(A)='T' -> (nmu x nl); op(B=zbuf)='N' -> (nl x nrow).
+    cdef char tT = 84, tN = 78   # 'T', 'N'
+    cdef int mm = nmu, nn = nrow, kk = nl, ld = nl, ldc = nmu
+    cdef double alpha = 1.0, beta = 0.0
+    # BLAS dgemm mu-projection is OFF by default. scipy's bundled OpenBLAS is compiled MAX_THREADS=64 and
+    # corrupts its thread metadata when called from >64 prange threads -> segfault on >64-core nodes. The
+    # inline projection has no such limit and uses all cores. Opt back in (ONLY safe at <=64 threads, where
+    # it is ~1.7x faster) via FEAT_USE_BLAS_DGEMM=1.
+    cdef int use_blas = 1 if os.environ.get('FEAT_USE_BLAS_DGEMM','0')=='1' else 0
+
+    for il in xrange(nl):
+        twol_arr[il] = (2.*il+2*lmin+1.)
+
+    for ip in prange(npairs, nogil=True, schedule='static', num_threads=nthreads):
+        tid = threadid()
+        for jp in xrange(ip,npairs):
+            # --- zeta into the compact buffer (ZZ and ZZbar, re/im), summed over polarizations ---
+            for a in xrange(nslot):
+                for b in xrange(nslot):
+                    cp = a*nslot+b
+                    for il in xrange(nl):
+                        zzr=0.; zzi=0.; zbr=0.; zbi=0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                ic = inv_Cl_mat[ipol,jpol,il+lmin]
+                                ar = legre[a,il+lmin,ipol,ip]; ai = legim[a,il+lmin,ipol,ip]
+                                br = legre[b,il+lmin,jpol,jp]; bi = legim[b,il+lmin,jpol,jp]
+                                zzr = zzr + ic*(ar*br - ai*bi); zzi = zzi + ic*(ar*bi + ai*br)   # leg_a*leg_b
+                                zbr = zbr + ic*(ar*br + ai*bi); zbi = zbi + ic*(ai*br - ar*bi)   # leg_a*conj(leg_b)
+                        tl = twol_arr[il]
+                        zbuf[tid,cp,il]=tl*zzr; zbuf[tid,nsp+cp,il]=tl*zzi
+                        zbuf[tid,2*nsp+cp,il]=tl*zbr; zbuf[tid,3*nsp+cp,il]=tl*zbi
+            # --- mu-projection Sbuf[row,mu] = sum_l zbuf[row,l] legs[mu,l] ---
+            # Default: inline loop (no OpenBLAS -> no >64-thread crash, scales to all cores). Opt-in dgemm
+            # (FEAT_USE_BLAS_DGEMM=1) only for large nl AND <=64 threads, where the matmul is the win.
+            if nl > 96 and use_blas:
+                dgemm(&tT,&tN,&mm,&nn,&kk,&alpha,&legs[0,0],&ld,&zbuf[tid,0,0],&ld,&beta,&Sbuf[tid,0,0],&ldc)
+            else:
+                for imu in xrange(nmu):
+                    for cp in xrange(nrow):
+                        zzr=0.
+                        for il in xrange(nl):
+                            zzr = zzr + zbuf[tid,cp,il]*legs[imu,il]
+                        Sbuf[tid,cp,imu]=zzr
+            # --- mu integral + term-pair combination (read projected s-values from Sbuf) ---
+            mZZr=0.; mZBr=0.
+            for imu in xrange(nmu):
+                accZZr=0.; accZBr=0.
+                for tA in xrange(nterm):
+                    gA = term_group[tA]; i0=term_slots[tA,0]; i1=term_slots[tA,1]; i2=term_slots[tA,2]
+                    VAr = Vgre[gA,ip]; VAi = Vgim[gA,ip]
+                    for tB in xrange(nterm):
+                        gB = term_group[tB]; j0=term_slots[tB,0]; j1=term_slots[tB,1]; j2=term_slots[tB,2]
+                        VBr = Vgre[gB,jp]; VBi = Vgim[gB,jp]
+                        c00=i0*nslot+j0; c11=i1*nslot+j1; c22=i2*nslot+j2
+                        # ZZ triple product of projected s = Sbuf[cp] + i Sbuf[nsp+cp]
+                        s00r=Sbuf[tid,c00,imu]; s00i=Sbuf[tid,nsp+c00,imu]
+                        s11r=Sbuf[tid,c11,imu]; s11i=Sbuf[tid,nsp+c11,imu]
+                        s22r=Sbuf[tid,c22,imu]; s22i=Sbuf[tid,nsp+c22,imu]
+                        p12r = s00r*s11r - s00i*s11i; p12i = s00r*s11i + s00i*s11r
+                        Pr = p12r*s22r - p12i*s22i; Pi = p12r*s22i + p12i*s22r
+                        vr = VAr*VBr - VAi*VBi; vi = VAr*VBi + VAi*VBr        # VA*VB
+                        accZZr = accZZr + vr*Pr - vi*Pi
+                        # ZZbar: s = Sbuf[2*nsp+cp] + i Sbuf[3*nsp+cp]; weight VA*conj(VB)
+                        b00r=Sbuf[tid,2*nsp+c00,imu]; b00i=Sbuf[tid,3*nsp+c00,imu]
+                        b11r=Sbuf[tid,2*nsp+c11,imu]; b11i=Sbuf[tid,3*nsp+c11,imu]
+                        b22r=Sbuf[tid,2*nsp+c22,imu]; b22i=Sbuf[tid,3*nsp+c22,imu]
+                        p12r = b00r*b11r - b00i*b11i; p12i = b00r*b11i + b00i*b11r
+                        Pbr = p12r*b22r - p12i*b22i; Pbi = p12r*b22i + p12i*b22r
+                        vbr_ = VAr*VBr + VAi*VBi; vbi_ = VAi*VBr - VAr*VBi    # VA*conj(VB)
+                        accZBr = accZBr + vbr_*Pbr - vbi_*Pbi
+                mZZr = mZZr + w_mus[imu]*accZZr
+                mZBr = mZBr + w_mus[imu]*accZBr
+            deriv_matrix[ip,jp] = prefc*weights[ip]*weights[jp]*(2.*mZZr + 2.*mZBr)
+            if ip!=jp:
+                deriv_matrix[jp,ip] = deriv_matrix[ip,jp]
+
+    return deriv_matrix
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cpdef double[::1] fisher_deriv_fNL_feat_res_2d_complex_batch(double[:,:,:,::1] legre, double[:,:,:,::1] legim,
+                        double[:] weights, double[:,:,::1] Vgre, double[:,:,::1] Vgim,
+                        int[::1] term_group, int[:,::1] term_slots, int nslot,
+                        double[:,:,::1] inv_Cl_mat, double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
+    """BATCHED ideal-Fisher SCALAR for fNL-feat-res over many (omega,kappa) at once.
+
+    Identical to fisher_deriv_fNL_feat_res_2d_complex except: (a) the per-pair leg work -- the zeta build
+    and the mu-projection Sbuf -- is PARAMETER-INDEPENDENT and computed ONCE per (ip,jp), then (b) the cheap
+    term-pair combination (the ONLY (omega,kappa)-dependent step, via the per-param weights Vg) is looped over
+    all nparam and reduced directly into a per-param SCALAR Fisher F[p] = sum over the full (ip,jp) matrix.
+    This shares the expensive projection across the whole batch and avoids materialising nparam N_pairs^2
+    matrices. Term structure (term_group/term_slots/nslot) is common to all params (the sm3/sm1 recipe KEYS
+    are omega-independent; only the coefficients folded into Vg change).
+
+    Vgre/Vgim: (nparam, ngroup, npairs). Returns F: (nparam,). For a single param, F[0] equals
+    np.sum(fisher_deriv_fNL_feat_res_2d_complex(... that param's Vg ...)) to machine precision."""
+
+    cdef int nl = lmax+1-lmin, npairs = legre.shape[3], npol = legre.shape[2], nmu = len(w_mus)
+    cdef int nterm = term_group.shape[0], nsp = nslot*nslot, nrow = 4*nslot*nslot
+    cdef int nparam = Vgre.shape[0], ng = Vgre.shape[1], ng2 = ng*ng
+    cdef int il, ip, jp, ipol, jpol, tid, imu, a, b, cp, tA, tB, gA, gB, i0,i1,i2,j0,j1,j2, c00,c11,c22, pidx, gg
+    cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
+    cdef double[:,:,::1] zbuf = np.zeros((nthreads,4*25,nl),dtype=np.float64)
+    cdef double[:,:,::1] Sbuf = np.zeros((nthreads,4*25,nmu),dtype=np.float64)
+    # Per-thread group-level, mu-INTEGRATED form factors U[gA,gB] (ZZ and ZZbar), PARAM-INDEPENDENT: the sole
+    # (omega,kappa) dependence is the per-group weight Vg, so we integrate the term/mu structure into
+    #   U_ZZ[gA,gB](ip,jp) = sum_mu w_mu sum_{tA in gA, tB in gB} s_i0 s_i1 s_i2      (ZZ, complex)
+    # ONCE per (ip,jp), then contract F[p] += w_ip w_jp sum_{gA,gB} 2Re[VA VB U_ZZ] + 2Re[VA conj(VB) U_ZB]
+    # for each param -- only ng^2 (<=9) cheap ops per param, so the batch cost is ~independent of nparam.
+    cdef double[:,::1] Uzzr = np.zeros((nthreads,ng2),dtype=np.float64)
+    cdef double[:,::1] Uzzi = np.zeros((nthreads,ng2),dtype=np.float64)
+    cdef double[:,::1] Uzbr = np.zeros((nthreads,ng2),dtype=np.float64)
+    cdef double[:,::1] Uzbi = np.zeros((nthreads,ng2),dtype=np.float64)
+    # per-thread, per-param accumulator of the scalar Fisher (reduced at the end -> no race in prange).
+    # Kahan (compensated) summation over the long per-thread pair loop keeps the reduction at the float64
+    # floor, so the batched scalar matches the single-param np.sum(deriv_matrix) as closely as summation allows.
+    cdef double[:,::1] Fbuf = np.zeros((nthreads,nparam),dtype=np.float64)
+    cdef double[:,::1] Kbuf = np.zeros((nthreads,nparam),dtype=np.float64)   # Kahan compensation
+    cdef np.ndarray[np.float64_t,ndim=1] Fout = np.zeros(nparam,dtype=np.float64)
+    cdef double prefc = 1.0/(48.0*M_PI)
+    cdef double ic, ar, ai, br, bi, zzr, zzi, zbr, zbi, tl, wpair, wmu
+    cdef double p12r,p12i,Pr,Pi, Pbr,Pbi, VAr,VAi,VBr,VBi, vr,vi, vbr_,vbi_, uzr,uzi,ubr,ubi
+    cdef double accr, val, kterm, kt, ky
+    cdef double s00r,s00i,s11r,s11i,s22r,s22i, b00r,b00i,b11r,b11i,b22r,b22i
+    cdef char tT = 84, tN = 78
+    cdef int mm = nmu, nn = nrow, kk = nl, ld = nl, ldc = nmu
+    cdef double alpha = 1.0, beta = 0.0
+    cdef int use_blas = 1 if os.environ.get('FEAT_USE_BLAS_DGEMM','0')=='1' else 0
+
+    for il in xrange(nl):
+        twol_arr[il] = (2.*il+2*lmin+1.)
+
+    for ip in prange(npairs, nogil=True, schedule='static', num_threads=nthreads):
+        tid = threadid()
+        for jp in xrange(ip,npairs):
+            # --- zeta into the compact buffer (PARAM-INDEPENDENT) ---
+            for a in xrange(nslot):
+                for b in xrange(nslot):
+                    cp = a*nslot+b
+                    for il in xrange(nl):
+                        zzr=0.; zzi=0.; zbr=0.; zbi=0.
+                        for ipol in xrange(npol):
+                            for jpol in xrange(npol):
+                                ic = inv_Cl_mat[ipol,jpol,il+lmin]
+                                ar = legre[a,il+lmin,ipol,ip]; ai = legim[a,il+lmin,ipol,ip]
+                                br = legre[b,il+lmin,jpol,jp]; bi = legim[b,il+lmin,jpol,jp]
+                                zzr = zzr + ic*(ar*br - ai*bi); zzi = zzi + ic*(ar*bi + ai*br)
+                                zbr = zbr + ic*(ar*br + ai*bi); zbi = zbi + ic*(ai*br - ar*bi)
+                        tl = twol_arr[il]
+                        zbuf[tid,cp,il]=tl*zzr; zbuf[tid,nsp+cp,il]=tl*zzi
+                        zbuf[tid,2*nsp+cp,il]=tl*zbr; zbuf[tid,3*nsp+cp,il]=tl*zbi
+            # --- mu-projection Sbuf (PARAM-INDEPENDENT) ---
+            if nl > 96 and use_blas:
+                dgemm(&tT,&tN,&mm,&nn,&kk,&alpha,&legs[0,0],&ld,&zbuf[tid,0,0],&ld,&beta,&Sbuf[tid,0,0],&ldc)
+            else:
+                for imu in xrange(nmu):
+                    for cp in xrange(nrow):
+                        zzr=0.
+                        for il in xrange(nl):
+                            zzr = zzr + zbuf[tid,cp,il]*legs[imu,il]
+                        Sbuf[tid,cp,imu]=zzr
+            # --- PARAM-INDEPENDENT group form factors U[gA,gB] (mu-integrated), built ONCE per pair ---
+            for gg in xrange(ng2):
+                Uzzr[tid,gg]=0.; Uzzi[tid,gg]=0.; Uzbr[tid,gg]=0.; Uzbi[tid,gg]=0.
+            for imu in xrange(nmu):
+                wmu = w_mus[imu]
+                for tA in xrange(nterm):
+                    gA = term_group[tA]; i0=term_slots[tA,0]; i1=term_slots[tA,1]; i2=term_slots[tA,2]
+                    for tB in xrange(nterm):
+                        gB = term_group[tB]; j0=term_slots[tB,0]; j1=term_slots[tB,1]; j2=term_slots[tB,2]
+                        gg = gA*ng+gB
+                        c00=i0*nslot+j0; c11=i1*nslot+j1; c22=i2*nslot+j2
+                        # ZZ triple product of projected s = Sbuf[cp] + i Sbuf[nsp+cp]
+                        s00r=Sbuf[tid,c00,imu]; s00i=Sbuf[tid,nsp+c00,imu]
+                        s11r=Sbuf[tid,c11,imu]; s11i=Sbuf[tid,nsp+c11,imu]
+                        s22r=Sbuf[tid,c22,imu]; s22i=Sbuf[tid,nsp+c22,imu]
+                        p12r = s00r*s11r - s00i*s11i; p12i = s00r*s11i + s00i*s11r
+                        Pr = p12r*s22r - p12i*s22i; Pi = p12r*s22i + p12i*s22r
+                        Uzzr[tid,gg] = Uzzr[tid,gg] + wmu*Pr; Uzzi[tid,gg] = Uzzi[tid,gg] + wmu*Pi
+                        # ZZbar triple product: s = Sbuf[2*nsp+cp] + i Sbuf[3*nsp+cp]
+                        b00r=Sbuf[tid,2*nsp+c00,imu]; b00i=Sbuf[tid,3*nsp+c00,imu]
+                        b11r=Sbuf[tid,2*nsp+c11,imu]; b11i=Sbuf[tid,3*nsp+c11,imu]
+                        b22r=Sbuf[tid,2*nsp+c22,imu]; b22i=Sbuf[tid,3*nsp+c22,imu]
+                        p12r = b00r*b11r - b00i*b11i; p12i = b00r*b11i + b00i*b11r
+                        Pbr = p12r*b22r - p12i*b22i; Pbi = p12r*b22i + p12i*b22r
+                        Uzbr[tid,gg] = Uzbr[tid,gg] + wmu*Pbr; Uzbi[tid,gg] = Uzbi[tid,gg] + wmu*Pbi
+            # --- (omega,kappa)-DEPENDENT contraction with Vg (cheap: ng^2 per param) ---
+            wpair = prefc*weights[ip]*weights[jp]
+            for pidx in xrange(nparam):
+                accr = 0.
+                for gA in xrange(ng):
+                    VAr = Vgre[pidx,gA,ip]; VAi = Vgim[pidx,gA,ip]
+                    for gB in xrange(ng):
+                        gg = gA*ng+gB
+                        VBr = Vgre[pidx,gB,jp]; VBi = Vgim[pidx,gB,jp]
+                        uzr = Uzzr[tid,gg]; uzi = Uzzi[tid,gg]
+                        ubr = Uzbr[tid,gg]; ubi = Uzbi[tid,gg]
+                        vr = VAr*VBr - VAi*VBi; vi = VAr*VBi + VAi*VBr        # VA*VB
+                        accr = accr + (vr*uzr - vi*uzi)                       # Re[VA VB U_ZZ]
+                        vbr_ = VAr*VBr + VAi*VBi; vbi_ = VAi*VBr - VAr*VBi    # VA*conj(VB)
+                        accr = accr + (vbr_*ubr - vbi_*ubi)                   # Re[VA conj(VB) U_ZB]
+                val = wpair*2.*accr
+                # accumulate the FULL-matrix sum: diagonal once, off-diagonal twice (symmetric)
+                if ip!=jp:
+                    kterm = 2.*val
+                else:
+                    kterm = val
+                # Kahan-compensated add of kterm into Fbuf[tid,pidx]
+                ky = kterm - Kbuf[tid,pidx]
+                kt = Fbuf[tid,pidx] + ky
+                Kbuf[tid,pidx] = (kt - Fbuf[tid,pidx]) - ky
+                Fbuf[tid,pidx] = kt
+
+    for tid in xrange(nthreads):
+        for pidx in xrange(nparam):
+            Fout[pidx] += Fbuf[tid,pidx]
+    return Fout
 
 
 

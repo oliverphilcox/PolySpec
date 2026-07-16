@@ -4,7 +4,7 @@ from __future__ import print_function
 import numpy as np
 cimport numpy as np
 cimport cython
-from libc.math cimport abs, M_PI, M_E, sqrt, exp, pow as dpow, sin
+from libc.math cimport abs, M_PI, M_E, sqrt, exp, pow as dpow, sin, cos
 from cython.parallel import prange
 
 cdef extern from "gsl/gsl_errno.h" nogil:
@@ -482,7 +482,59 @@ cpdef void q_integral_exp(double[:] k_arr, double kpow, double[:] u_arr, double[
                         f_high = kprod[ik]*Tl_arr[1,lmin+il,ik]*jlkr[il,ir,ik]*exp(-k_arr[ik]*u_arr[iu])
                         integs[lmin+il,1,ir,iu] += lpref*(k_arr[ik]-k_arr[ik-1])*(f_low+f_high)
                         f_low = f_high
-    
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cpdef void q_integral_exp_complex(double[:] k_arr, double kpow, double[:] u_re, double[:] u_im, double[:,:,::1] Tl_arr, double[:,:,::1] jlkr, int lmin, int lmax, int nthreads, np.ndarray[np.float64_t,ndim=4] _integs_re, np.ndarray[np.float64_t,ndim=4] _integs_im):
+    """Complex-u version of q_integral_exp: compute q_l^X(r, u) with u = u_re + i*u_im (a COMPLEX
+    decay), returning the real and imaginary parts as SEPARATE real arrays. Uses
+    e^{-k u} = e^{-k u_re}[cos(k u_im) - i sin(k u_im)], so the leg factorises into two real k-integrals.
+    Structure is IDENTICAL to q_integral_exp so that at u_im=0 it reproduces it bit-for-bit (integs_im=0).
+    u is dimensionless; any k_res/c_s rescaling is applied externally."""
+
+    cdef int il, ik, ir, iu, nk = len(k_arr), nr = _integs_re.shape[2], nu = _integs_re.shape[3], nl = lmax+1-lmin, npol = len(Tl_arr)
+    cdef double[:] kprod = np.zeros((nk),dtype=np.float64)
+    cdef double lpref, base_low, base_high, damp, ph, fr_low, fr_high, fi_low, fi_high
+    cdef double[:,:,:,::1] integs_re = _integs_re
+    cdef double[:,:,:,::1] integs_im = _integs_im
+
+    # Compute k-dependent piece (identical to q_integral_exp)
+    for ik in prange(nk,nogil=True,schedule='static',num_threads=nthreads):
+        kprod[ik] = 2./M_PI*k_arr[ik]*k_arr[ik]/2.*dpow(k_arr[ik], kpow)
+
+    # Perform sum for each polarization
+    for il in prange(nl,nogil=True,schedule='static',num_threads=nthreads):
+        lpref = dpow(-1.,lmin+il)
+        for ir in xrange(nr):
+            for iu in xrange(nu):
+                # base_* is the real leg factor kprod*Tl*jlkr; damp*cos / -damp*sin split the complex e^{-ku}
+                base_low = kprod[0]*Tl_arr[0,lmin+il,0]*jlkr[il,ir,0]
+                damp = exp(-k_arr[0]*u_re[iu]); ph = k_arr[0]*u_im[iu]
+                fr_low = base_low*damp*cos(ph); fi_low = -base_low*damp*sin(ph)
+                for ik in xrange(1,nk):
+                    base_high = kprod[ik]*Tl_arr[0,lmin+il,ik]*jlkr[il,ir,ik]
+                    damp = exp(-k_arr[ik]*u_re[iu]); ph = k_arr[ik]*u_im[iu]
+                    fr_high = base_high*damp*cos(ph); fi_high = -base_high*damp*sin(ph)
+                    integs_re[lmin+il,0,ir,iu] += lpref*(k_arr[ik]-k_arr[ik-1])*(fr_low+fr_high)
+                    integs_im[lmin+il,0,ir,iu] += lpref*(k_arr[ik]-k_arr[ik-1])*(fi_low+fi_high)
+                    fr_low = fr_high; fi_low = fi_high
+    if npol>1:
+        for il in prange(nl,nogil=True,schedule='static',num_threads=nthreads):
+            lpref = dpow(-1.,lmin+il)
+            for ir in xrange(nr):
+                for iu in xrange(nu):
+                    base_low = kprod[0]*Tl_arr[1,lmin+il,0]*jlkr[il,ir,0]
+                    damp = exp(-k_arr[0]*u_re[iu]); ph = k_arr[0]*u_im[iu]
+                    fr_low = base_low*damp*cos(ph); fi_low = -base_low*damp*sin(ph)
+                    for ik in xrange(1,nk):
+                        base_high = kprod[ik]*Tl_arr[1,lmin+il,ik]*jlkr[il,ir,ik]
+                        damp = exp(-k_arr[ik]*u_re[iu]); ph = k_arr[ik]*u_im[iu]
+                        fr_high = base_high*damp*cos(ph); fi_high = -base_high*damp*sin(ph)
+                        integs_re[lmin+il,1,ir,iu] += lpref*(k_arr[ik]-k_arr[ik-1])*(fr_low+fr_high)
+                        integs_im[lmin+il,1,ir,iu] += lpref*(k_arr[ik]-k_arr[ik-1])*(fi_low+fi_high)
+                        fr_low = fr_high; fi_low = fi_high
+
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)

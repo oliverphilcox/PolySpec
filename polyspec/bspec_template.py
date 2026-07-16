@@ -203,30 +203,52 @@ class BSpecTemplate():
             self.to_compute.append(['f_exp'])
             self.ints_1d = True
             assert 'kres_cs' in self.feat_params, "Must specify kres_cs to use resonant templates!"
-            assert 'u_arr' in self.feat_params, "Must specify u_arr to use resonant templates!"
             assert 'omega' in self.feat_params, "Must specify omega to use resonant templates!"
-            self.u_arr = self.feat_params['u_arr']
-            self.N_u = len(self.u_arr)
             self.omega = self.feat_params['omega']
+            kappa = self.feat_params['kres_cs']   # kappa = k_res/c_s
 
-            # k-powers (x_j(k) ~ k^{kpow}) needed for the exact separable form of B_res: p_2(k)=k^{-2}e^{-ku}, p_3(k)=k^{-3}e^{-ku}
-            # (used by the ideal Fisher / Q-derivative / linear-term paths, which still use the divergent
-            # u^{i*omega-1-n} Mellin representation). p_{-1},p_0,p_1 are additionally needed by the genuinely
-            # convergent (shifted-Mellin) representation used by the cubic numerator; see below.
-            self.feat_kpows = [-3,-2,-1,0,1]
+            # Integration scheme for the (non-separable) scalar u-integral factor
+            #   F(K) = cosh(pi w/2) Gamma(iw) (K/kappa)^{-iw},  K = k1+k2+k3,
+            # which -- since S(u)=S_0 e^{-Ku} factorises exactly -- is the ENTIRE difficulty. Both schemes
+            # represent F(K) as a compressed separable exponential sum  F(K) ~ sum_j W_j e^{-K u_j}  with
+            # complex nodes u_j on the rotated contour and complex weights W_j (fit by pivoted-QR + lstsq):
+            #   'sm3' (default): reconstruct with the m=n bracket    -> legs k^{-3..0}   (no k^{+1}, no r-aliasing)
+            #   'sm1'          : reconstruct with the K-raised bracket-> legs k^{-3..+1} (worse-conditioned weights)
+            # Both give the same B_res; see FEAT_NOTES.md Sessions 4-6.
+            self.feat_scheme = self.feat_params.get('integration_scheme', 'sm3')
+            assert self.feat_scheme in ('sm3','sm1'), "integration_scheme must be 'sm3' or 'sm1'"
+            self.feat_kpows = [-3,-2,-1,0] if self.feat_scheme=='sm3' else [-3,-2,-1,0,1]
 
-            # Quadrature measure for the log-spaced u integral (trapezium rule in ln(u)). This is deliberately
-            # just the real measure 'du', with NO Mellin power of u baked in: the exact B_res form collapses
-            # onto a common u^{i*omega-1} weight (with no leftover Gamma(i*omega) factor -- it is already fully
-            # absorbed into the closed-form 'prefactor' used at each consumption site), but the different groups
-            # (M1,M2,M3) need different powers of u (u^{i*omega-1}, u^{i*omega-2}, u^{i*omega-4}), so that power
-            # is applied explicitly wherever self.u_weights is consumed (numerator, Q-derivative, ideal Fisher).
-            log_u = np.log(self.u_arr)
-            dlnu = np.zeros(self.N_u, dtype=np.float64)
-            dlnu[:-1] += 0.5*np.diff(log_u)
-            dlnu[1:] += 0.5*np.diff(log_u)
-            du = dlnu*self.u_arr
-            self.u_weights = np.asarray(du, dtype=np.complex128, order='C')
+            # e1=k1+k2+k3 range over which the exp-sum must be valid. For k in [kmin,kmax] a triangle has
+            # e1 in [3 kmin, 3 kmax] exactly. Overridable via feat_params ('e1_min','e1_max','expsum_tol').
+            assert len(self.k_arr)>0, "Must supply k_arr to use resonant templates!"
+            Kmin = self.feat_params.get('e1_min', 3.*np.min(self.k_arr))
+            Kmax = self.feat_params.get('e1_max', 3.*np.max(self.k_arr))
+            tol  = self.feat_params.get('expsum_tol', 1e-6)
+            # Build the compressed complex nodes u_j and complex weights W_j. sm1 reconstructs with the
+            # K-raised bracket, so its u-factor target is K^{-iw-1} (kpow_shift=-1); sm3 uses K^{-iw} (shift 0).
+            kpow_shift = 0 if self.feat_scheme=='sm3' else -1
+            # Store the REAL rotated-contour t-grid + the fixed rotation angle phi. The complex node is
+            # u = t*e^{i phi}; the rotation is applied only inside the (complex) leg integral. All nodes
+            # share this single phi, so t (real, positive, monotone) is the natural stored grid.
+            # Optional grid_omega: build the node grid at a (larger) frequency and reuse it for self.omega
+            # (one node set for a whole omega-scan; see _build_feat_res_expsum). None -> native per-omega grid.
+            grid_omega = self.feat_params.get('grid_omega', None)
+            phi_factor = self.feat_params.get('phi_factor', 8.0)   # contour angle phi=arctan(omega_grid/phi_factor)
+            self.t_arr, self.feat_phi, self.feat_W = self._build_feat_res_expsum(self.omega, kappa, Kmin, Kmax, kpow_shift=kpow_shift, tol=tol, grid_omega=grid_omega, phi_factor=phi_factor, verb=True)
+            self.N_t = len(self.t_arr)
+            # Stash the exp-sum build config so (omega,kappa) can be re-set on the SAME node grid later
+            # (see set_feat_params / the *_feat_batch drivers). Because grid_omega/phi_factor/Kmin/Kmax/tol
+            # are fixed here, re-building for a different omega returns IDENTICAL nodes (only W changes) --
+            # which is exactly what lets one node grid (hence one set of legs + filtered maps) serve a whole
+            # (omega,kappa) scan.
+            self._feat_build_cfg = dict(Kmin=Kmin, Kmax=Kmax, kpow_shift=kpow_shift, tol=tol,
+                                        grid_omega=grid_omega, phi_factor=phi_factor)
+            # fnl_sum weight per node = W_j (compression amplitude). NO Mellin power is applied anywhere:
+            # F(K) is represented directly by sum_j W_j e^{-K u_j}; cosh & Gamma(iw) are folded into W_j.
+            self.u_weights = np.asarray(self.feat_W, dtype=np.complex128, order='C')
+            # Bracket recipe {sorted kpow-triple: complex coeff} of fnl_sum calls for the chosen scheme.
+            self.feat_recipe = self._feat_bracket_recipe(self.omega, self.feat_scheme)
         
         if 'binned' in templates:
             # Check inputs
@@ -490,14 +512,21 @@ class BSpecTemplate():
 
         if 'f_exp' in self.to_compute and ints_1d:
 
-            print("Computing exponential f_l^X(r,u) integrals")
+            print("Computing exponential f_l^X(r,u) integrals (complex rotated-contour nodes)")
             # Legs are pure k^{kpow} power laws (ns=1 slope, no As); the full As^2 amplitude dependence is
             # instead applied explicitly via the (2 pi^2 As)^2 prefactor in Bl_numerator, so every term
             # (regardless of which k-powers it mixes) carries exactly As^2.
-            self.flXs_exp = {}
+            # The decay e^{-k u_j} is COMPLEX (u_j on the rotated contour); real/imag parts are stored as
+            # separate real arrays (1j applied only at the numerator, per the Re/Im expansion).
+            self.flXs_exp_re = {}
+            self.flXs_exp_im = {}
+            # complex node u = t*e^{i phi}: real/imag decay rates fed to the complex leg integral
+            u_re = np.ascontiguousarray(self.t_arr*np.cos(self.feat_phi))
+            u_im = np.ascontiguousarray(self.t_arr*np.sin(self.feat_phi))
             for kpow in self.feat_kpows:
-                self.flXs_exp[kpow] = np.zeros((self.lmax+1,1+2*self.pol,self.N_r,self.N_u),dtype=np.float64,order='C')
-                q_integral_exp(self.k_arr, float(kpow), self.u_arr, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_exp[kpow])
+                self.flXs_exp_re[kpow] = np.zeros((self.lmax+1,1+2*self.pol,self.N_r,self.N_t),dtype=np.float64,order='C')
+                self.flXs_exp_im[kpow] = np.zeros((self.lmax+1,1+2*self.pol,self.N_r,self.N_t),dtype=np.float64,order='C')
+                q_integral_exp_complex(self.k_arr, float(kpow), u_re, u_im, self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_exp_re[kpow], self.flXs_exp_im[kpow])
         
         if 'f_bin' in self.to_compute and ints_1d:
             
@@ -700,7 +729,15 @@ class BSpecTemplate():
             return np.asarray([self._compute_weighted_map_single(imap, self.flXs_p4, radial_index) for imap in input_maps],order='C')    
 
         elif filtering=='F_exp':
-            return {kpow: np.asarray([self._compute_weighted_maps(imap, np.asarray(self.flXs_exp[kpow][:,:,radial_index,:],order='C'))[:,None,:] for imap in input_maps],order='C') for kpow in self.feat_kpows}
+            # Complex leg maps (real/imag legs filtered separately, recombined with 1j).
+            out = {}
+            for kpow in self.feat_kpows:
+                fr = np.asarray(self.flXs_exp_re[kpow][:,:,radial_index,:], order='C')
+                fi = np.asarray(self.flXs_exp_im[kpow][:,:,radial_index,:], order='C')
+                maps = [ (self._compute_weighted_maps(imap, fr)[:,None,:]
+                          + 1j*self._compute_weighted_maps(imap, fi)[:,None,:]) for imap in input_maps ]
+                out[kpow] = np.asarray(maps, order='C')
+            return out
 
         elif filtering=='F_bin':
             return np.asarray([self._compute_weighted_maps(imap, np.asarray(self.flXs_bin[:,:,radial_index,:], order='C')) for imap in input_maps],order='C')
@@ -764,10 +801,15 @@ class BSpecTemplate():
             output['f_osc'] = self._compute_weighted_maps(input_map, self.flXs_osc)
             
         if 'f_exp' in self.to_compute:
-            output['f_exp'] = {}
+            # Complex leg maps: since _compute_weighted_maps is LINEAR in flX, the real/imag map parts are
+            # obtained by filtering with the real/imag leg arrays separately (1j applied at the numerator).
+            output['f_exp_re'] = {}
+            output['f_exp_im'] = {}
             for kpow in self.feat_kpows:
-                flXs_exp_flat = np.asarray(self.flXs_exp[kpow].reshape(self.flXs_exp[kpow].shape[0], self.flXs_exp[kpow].shape[1], -1), order='C')
-                output['f_exp'][kpow] = self._compute_weighted_maps(input_map, flXs_exp_flat).reshape(self.N_r, self.N_u, self.base.Npix)
+                fr = np.asarray(self.flXs_exp_re[kpow].reshape(self.flXs_exp_re[kpow].shape[0], self.flXs_exp_re[kpow].shape[1], -1), order='C')
+                fi = np.asarray(self.flXs_exp_im[kpow].reshape(self.flXs_exp_im[kpow].shape[0], self.flXs_exp_im[kpow].shape[1], -1), order='C')
+                output['f_exp_re'][kpow] = self._compute_weighted_maps(input_map, fr).reshape(self.N_r, self.N_t, self.base.Npix)
+                output['f_exp_im'][kpow] = self._compute_weighted_maps(input_map, fi).reshape(self.N_r, self.N_t, self.base.Npix)
             
         # Compute binned maps
         if 'f_bin' in self.to_compute:
@@ -945,6 +987,22 @@ class BSpecTemplate():
         else:
             raise Exception(f"Wrong spin s = {spin}!")
 
+    def _transform_maps_complex(self, inner, outer_re, outer_im, weight):
+        """Complex version of _transform_maps (spin 0): compute
+            Sum_i weight_i outer^X_l(i) [SHT(inner)]_lm(i)
+        for a COMPLEX real-space map inner = inner_re + i*inner_im, COMPLEX per-node weight, and a COMPLEX
+        outer leg outer = outer_re + i*outer_im (real/imag parts passed separately). SHTs are done on the
+        real and imaginary map parts SEPARATELY (each a genuine real map) and recombined with 1j -- never a
+        complex map into a real SHT. The complex (weight*outer) is folded into a real g = g_re + i*g_im and
+        the radial sum split into two real radial_sum calls. Returns a complex (npol, nlm) a_lm array."""
+        L = (np.asarray(self.base.to_lm_vec(np.ascontiguousarray(inner.real), lmax=self.lmax)[:,self.lminfilt], order='C')
+             + 1j*np.asarray(self.base.to_lm_vec(np.ascontiguousarray(inner.imag), lmax=self.lmax)[:,self.lminfilt], order='C'))
+        wr = weight.real[None,None,:]; wi = weight.imag[None,None,:]
+        g_re = np.ascontiguousarray(wr*outer_re - wi*outer_im)
+        g_im = np.ascontiguousarray(wr*outer_im + wi*outer_re)
+        ones = np.ones(inner.shape[0], dtype=np.float64)
+        return self.utils.radial_sum(L, ones, g_re) + 1j*self.utils.radial_sum(L, ones, g_im)
+
     def _compute_fisher_derivatives(self, templates, verb=False, input_derivatives={}):
         """Compute the derivative of the ideal Fisher matrix with respect to the weights for each template of interest."""
 
@@ -1000,8 +1058,12 @@ class BSpecTemplate():
                 # comment in Bl_numerator for the genuinely-convergent Mellin-shift derivation). The (N_r, N_r)
                 # matrix needed by the optimize_radial_sampling_1d r-optimization workflow below is just this
                 # template's r-marginal of the full pair-pair matrix (sum over all u,u' at fixed r,r').
-                deriv_matrix_pairs, r_pairs, u_pairs = self.compute_ideal_fisher_2d_feat_res()
-                deriv_matrix = deriv_matrix_pairs.reshape(self.N_r, self.N_u, self.N_r, self.N_u).sum(axis=(1,3))
+                deriv_matrix_pairs, r_pairs, t_pairs = self.compute_ideal_fisher_2d_feat_res()
+                deriv_matrix = deriv_matrix_pairs.reshape(self.N_r, self.N_t, self.N_r, self.N_t).sum(axis=(1,3))
+                # Opt-in diagnostic stash of the full (N_pairs, N_pairs) derivative matrix + pair indices
+                # (set self._save_feat_pairs=True before calling). Off by default -> no memory cost in production.
+                if getattr(self, '_save_feat_pairs', False):
+                    self._feat_pairs_matrix = (deriv_matrix_pairs, r_pairs, t_pairs)
             
             elif 'neural' in template:
                 n = int(template.split('-')[1])
@@ -1021,62 +1083,137 @@ class BSpecTemplate():
         self.timers['analytic_fisher'] += time.time()-t_init
 
         return output
+    def _feat_res_fisher_deriv_complex(self, flXs_re, flXs_im, weights_pairs, W_pairs):
+        """Build the (N_pairs, N_pairs) ideal-Fisher derivative matrix for fNL-feat-res (sm3/sm1), given
+        the COMPLEX legs (real/imag parts) on (r,u) pairs. Shared by compute_ideal_fisher_2d_feat_res and
+        _build_and_optimize_ru_grid. Uses fisher_deriv_fNL_feat_res_2d_complex (F = 2Re<Z,Z> + 2<Z,Zbar>);
+        verified vs brute force (FEAT_NOTES Session 9/9b).
+          flXs_re/im: dict {kpow: (lmax+1, npol, N_pairs)}; weights_pairs: (N_pairs,) r-quadrature weight;
+          W_pairs: (N_pairs,) compression node-weight W_node per pair. Summing the matrix gives the ideal Fisher."""
+        npol = 1+2*self.pol; Npairs = len(weights_pairs)
+        # leg slots 0..4 = kpow -3,-2,-1,0,+1 (sm3 leaves slot 4 zero) -- PARAM-INDEPENDENT
+        legre = np.zeros((5, self.lmax+1, npol, Npairs), dtype=np.float64)
+        legim = np.zeros((5, self.lmax+1, npol, Npairs), dtype=np.float64)
+        for kpow in self.feat_kpows:
+            legre[kpow+3] = flXs_re[kpow]; legim[kpow+3] = flXs_im[kpow]
+        # complex per-pair group weights (pref0 kappa^{iw} gamma_g/n_ord folded in) + ordered-term list
+        Vgre, Vgim, term_group, term_slots, nslot = self._feat_ideal_vg(W_pairs)
+        inv_Cl_mat, legs, w_mus = self._feat_ideal_mu()
+        args = (np.ascontiguousarray(legre), np.ascontiguousarray(legim), np.ascontiguousarray(weights_pairs),
+                np.ascontiguousarray(Vgre), np.ascontiguousarray(Vgim), term_group, term_slots, nslot,
+                inv_Cl_mat, legs, np.ascontiguousarray(w_mus), self.lmin, self.lmax, self.base.nthreads)
+        # The routine BLAS-projects (dgemm) inside a prange over pairs, so pin BLAS to 1 thread to avoid
+        # nesting the BLAS thread pool inside the pair-parallel threads (oversubscription).
+        try:
+            from threadpoolctl import threadpool_limits
+            with threadpool_limits(limits=1, user_api='blas'):
+                dm = fisher_deriv_fNL_feat_res_2d_complex(*args)
+        except ImportError:
+            dm = fisher_deriv_fNL_feat_res_2d_complex(*args)
+        return np.asarray(dm)
+
     def compute_ideal_fisher_2d_feat_res(self):
         """
         Compute the ideal Fisher matrix for the fNL-feat-res template with r and u collapsed into a single
-        combined (r,u) 'pair' index. This is the SOLE ideal-Fisher computation for this template: there is
-        no separate 'r-only, u pre-summed internally' pathway. This requires self.flXs_exp[-3,-2,-1,0,1]
-        (shape (lmax+1, npol, N_r, N_u)) to already be computed, e.g. via _prepare_templates() or
-        optimize_radial_sampling_1d().
+        combined (r,u) 'pair' index (compressed exp-sum representation; complex rotated-contour nodes).
+        Requires self.flXs_exp_re/im[kpow] (shape (lmax+1, npol, N_r, N_u)), e.g. via _prepare_templates()
+        or optimize_radial_sampling_1d().
 
-        The (r,u) pairs are taken to be the full outer product of self.r_arr and self.u_arr. Summing the
-        full returned matrix gives the total ideal Fisher information; summing only the blocks sharing a
-        given r (or u) gives that variable's own marginal (N_r, N_r) (or (N_u, N_u)) Fisher matrix -- e.g.
-        _compute_fisher_derivatives uses the r-marginal for the optimize_radial_sampling_1d workflow, and
-        the u-marginal gives direct access to each u point's importance (not otherwise accessible, since a
-        plain r-matrix has u summed away before you ever see it).
+        The (r,t) pairs are the full outer product of self.r_arr and self.t_arr (pair p = ir*N_t + it).
+        Summing the full matrix gives the total ideal Fisher; r- or t-marginal blocks give those variables'
+        own marginal Fisher matrices (used by the optimize_radial_sampling_1d r-workflow).
 
-        Returns:
-            - deriv_matrix: (N_pairs, N_pairs) Fisher derivative matrix, pair-indexed (pair p = ir*N_u + iu)
-            - r_pairs, u_pairs: (N_pairs,) arrays giving the (r, u) value of each pair index
+        Returns: deriv_matrix (N_pairs,N_pairs); r_pairs, t_pairs (N_pairs,).
         """
-        assert hasattr(self, 'flXs_exp'), "Must first compute flXs_exp, e.g. via _prepare_templates() or optimize_radial_sampling_1d()!"
-        omega = self.omega
-        kappa = self.feat_params['kres_cs']
-        prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-        u_weight = self.u_weights*self.u_arr**(1j*omega)
-        coeff1 = 1./(1j*omega*(1j*omega-1)*(1j*omega-3))
-        coeff2 = 1./(1j*omega*(1j*omega-1))
-        coeff3 = 1./(1j*omega)
-        VQ1 = np.asarray(2.*np.real(prefactor*(3.*coeff1)*u_weight), order='C')
-        VQ2 = np.asarray(2.*np.real(prefactor*(24.*coeff1+6.*coeff2)*u_weight), order='C')
-        VQ3 = np.asarray(2.*np.real(prefactor*(18.*coeff1+6.*coeff2)*u_weight), order='C')
-        VQ4 = np.asarray(2.*np.real(prefactor*(36.*coeff1+15.*coeff2+3.*coeff3)*u_weight), order='C')
-
-        # Collapse (r, u) into a single 'pair' axis via the full outer product of self.r_arr, self.u_arr.
-        # flXs_exp is C-contiguous with shape (lmax+1, npol, N_r, N_u), so reshaping the last two axes into
-        # one directly gives pair index p = ir*N_u + iu; np.repeat/np.tile give the matching r- and u-weight
-        # arrays under the same ordering.
-        N_r, N_u = self.N_r, self.N_u
+        assert hasattr(self, 'flXs_exp_re'), "Must first compute flXs_exp_re/im, e.g. via _prepare_templates() or optimize_radial_sampling_1d()!"
+        N_r, N_t = self.N_r, self.N_t
         npol = 1+2*self.pol
-        flXs_pairs = {p: np.asarray(self.flXs_exp[p].reshape(self.lmax+1, npol, N_r*N_u), order='C') for p in [-3,-2,-1,0,1]}
-        weights_pairs = np.asarray(np.repeat(self.quad_weights_1d, N_u), order='C')
-        VQ1_pairs = np.asarray(np.tile(VQ1, N_r), order='C')
-        VQ2_pairs = np.asarray(np.tile(VQ2, N_r), order='C')
-        VQ3_pairs = np.asarray(np.tile(VQ3, N_r), order='C')
-        VQ4_pairs = np.asarray(np.tile(VQ4, N_r), order='C')
-        r_pairs = np.repeat(self.r_arr, N_u)
-        u_pairs = np.tile(self.u_arr, N_r)
+        flXs_re = {p: np.asarray(self.flXs_exp_re[p].reshape(self.lmax+1, npol, N_r*N_t), order='C') for p in self.feat_kpows}
+        flXs_im = {p: np.asarray(self.flXs_exp_im[p].reshape(self.lmax+1, npol, N_r*N_t), order='C') for p in self.feat_kpows}
+        weights_pairs = np.asarray(np.repeat(self.quad_weights_1d, N_t), order='C')   # r-quadrature weight per pair
+        W_pairs = np.asarray(np.tile(self.feat_W, N_r))                                # compression W per pair (per node)
+        r_pairs = np.repeat(self.r_arr, N_t)
+        t_pairs = np.tile(self.t_arr, N_r)
+        deriv_matrix = self._feat_res_fisher_deriv_complex(flXs_re, flXs_im, weights_pairs, W_pairs)
+        return deriv_matrix, r_pairs, t_pairs
 
-        [mus, w_mus] = p_roots(2*self.lmax+1)
-        legs = np.asarray([lpmn(0,self.lmax,mus[i])[0][0,self.lmin:] for i in range(len(mus))])
+    def _feat_ideal_vg(self, W_pairs):
+        """Build the complex per-pair group weights Vg = pref0*kappa^{iw}*W_node*gamma_g/n_ord_g and the
+        ordered-term list, for the CURRENT (omega,kappa,recipe). Returns (Vgre, Vgim, term_group, term_slots,
+        nslot). Only Vgre/Vgim depend on (omega,kappa); term_group/term_slots/nslot are scheme-fixed (the sm3/
+        sm1 recipe KEYS are omega-independent), so a batch reuses the term structure and re-builds only Vg."""
+        from itertools import permutations
+        omega = self.omega; kappa = self.feat_params['kres_cs']
+        C = (2*np.pi**2*self.As)**2*omega**2/(4.*(omega+1j))*kappa**(1j*omega)   # pref0 * kappa^{iw}
+        Npairs = len(W_pairs)
+        groups = list(self.feat_recipe.items()); ng = len(groups)
+        Vgre = np.zeros((ng, Npairs), dtype=np.float64); Vgim = np.zeros((ng, Npairs), dtype=np.float64)
+        term_slots = []; term_group = []
+        for gi, (key, gam) in enumerate(groups):
+            nord = len(set(permutations(key)))
+            Vg = C*W_pairs*(gam/nord)
+            Vgre[gi] = Vg.real; Vgim[gi] = Vg.imag
+            for o in set(permutations(key)):
+                term_slots.append([o[0]+3, o[1]+3, o[2]+3]); term_group.append(gi)
+        term_slots = np.ascontiguousarray(np.array(term_slots, dtype=np.int32))
+        term_group = np.ascontiguousarray(np.array(term_group, dtype=np.int32))
+        nslot = len(self.feat_kpows)   # active leg slots (sm3:4, sm1:5); slot=kpow+3, kpows contiguous from -3
+        return np.ascontiguousarray(Vgre), np.ascontiguousarray(Vgim), term_group, term_slots, nslot
 
-        deriv_matrix = np.asarray(fisher_deriv_fNL_feat_res_2d(flXs_pairs[-3], flXs_pairs[-2], flXs_pairs[-1], flXs_pairs[0], flXs_pairs[1],
-                            weights_pairs, VQ1_pairs, VQ2_pairs, VQ3_pairs, VQ4_pairs,
-                            np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
-                            legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+    def _feat_ideal_mu(self):
+        """Gauss-Legendre mu quadrature + inv-Cl for the ideal Fisher (param-independent). The integrand
+        (product of three degree<=lmax Legendre polys) has degree <=3*lmax, so ceil((3*lmax+1)/2) nodes are
+        exact. Returns (inv_Cl_mat, legs, w_mus)."""
+        n_mu = int(np.ceil((3*self.lmax+1)/2.))
+        [mus, w_mus] = p_roots(n_mu)
+        legs = np.ascontiguousarray(np.asarray([lpmn(0,self.lmax,mus[i])[0][0,self.lmin:] for i in range(len(mus))]))
+        inv_Cl_mat = np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat, order='C')
+        return inv_Cl_mat, legs, np.ascontiguousarray(w_mus)
 
-        return deriv_matrix, r_pairs, u_pairs
+    def compute_ideal_fisher_feat_batch(self, feat_params_list, verb=False):
+        """BATCHED ideal Fisher for a SET of (omega,kappa) sharing the current node + radial grid.
+
+        The expensive per-pair leg work (the zeta build + mu-projection) is (omega,kappa)-INDEPENDENT and done
+        ONCE inside fisher_deriv_fNL_feat_res_2d_complex_batch; only the cheap per-param term-combination
+        (weighted by Vg) is looped. Returns F: (nparam,) real ideal-Fisher scalars, F[i] matching
+        np.sum(compute_ideal_fisher_2d_feat_res()) run at feat_params_list[i] to machine precision.
+
+        feat_params_list: list of (omega, kappa) tuples (or dicts with 'omega','kres_cs'). Requires
+        self.flXs_exp_re/im (legs) already built on a grid_omega that covers every omega in the list."""
+        assert hasattr(self, 'flXs_exp_re'), "Must first compute flXs_exp_re/im (e.g. prepare a common r-grid)!"
+        N_r, N_t = self.N_r, self.N_t
+        npol = 1+2*self.pol
+        # PARAM-INDEPENDENT leg arrays on (r,u) pairs (slots 0..4 = kpow -3..+1)
+        Npairs = N_r*N_t
+        legre = np.zeros((5, self.lmax+1, npol, Npairs), dtype=np.float64)
+        legim = np.zeros((5, self.lmax+1, npol, Npairs), dtype=np.float64)
+        for kp in self.feat_kpows:
+            legre[kp+3] = np.asarray(self.flXs_exp_re[kp].reshape(self.lmax+1, npol, Npairs), order='C')
+            legim[kp+3] = np.asarray(self.flXs_exp_im[kp].reshape(self.lmax+1, npol, Npairs), order='C')
+        weights_pairs = np.asarray(np.repeat(self.quad_weights_1d, N_t), order='C')
+        inv_Cl_mat, legs, w_mus = self._feat_ideal_mu()
+
+        # per-param Vg (only piece that depends on (omega,kappa)); term structure common to all params
+        params = [p if isinstance(p, (tuple, list)) else (p['omega'], p['kres_cs']) for p in feat_params_list]
+        Vgre_list = []; Vgim_list = []; term_group = None; term_slots = None; nslot = None
+        for (om, ka) in params:
+            self.set_feat_params(om, ka, verb=verb)
+            W_pairs = np.asarray(np.tile(self.feat_W, N_r))
+            vgr, vgi, term_group, term_slots, nslot = self._feat_ideal_vg(W_pairs)
+            Vgre_list.append(vgr); Vgim_list.append(vgi)
+        Vgre = np.ascontiguousarray(np.stack(Vgre_list, axis=0))   # (nparam, ng, Npairs)
+        Vgim = np.ascontiguousarray(np.stack(Vgim_list, axis=0))
+
+        args = (np.ascontiguousarray(legre), np.ascontiguousarray(legim), np.ascontiguousarray(weights_pairs),
+                Vgre, Vgim, term_group, term_slots, nslot,
+                inv_Cl_mat, legs, w_mus, self.lmin, self.lmax, self.base.nthreads)
+        try:
+            from threadpoolctl import threadpool_limits
+            with threadpool_limits(limits=1, user_api='blas'):
+                F = fisher_deriv_fNL_feat_res_2d_complex_batch(*args)
+        except ImportError:
+            F = fisher_deriv_fNL_feat_res_2d_complex_batch(*args)
+        return np.asarray(F)
 
     def _greedy_optimize_fisher_matrix(self, deriv_matrix, tolerance=1e-3, verb=False, label=''):
         """
@@ -1152,6 +1289,189 @@ class BSpecTemplate():
         if verb: print("Ideal %s Fisher: %.4e (initial), %.4e (optimized). Relative score: %.2e"%(label, init_score, fish, score/init_score))
 
         return inds, w_opt, init_score, fish
+
+    @staticmethod
+    def _feat_bracket_recipe(omega, scheme):
+        """Return {sorted (kpow1,kpow2,kpow3): complex coeff} giving the fnl_sum decomposition of the
+        m=n bracket S_0 (scheme='sm3') or its K-raised form K*S_0 (scheme='sm1', legs +1 on one factor).
+        p_n(k)=k^{-n} -> leg kpow=-n. Ordered-perm coeffs: {-3,-3,0}:1, {-3,-2,-1}:i*w, {-2,-2,-2}:-(w^2+i*w).
+        Collapsing ordered perms to a sorted multiset with summed coeff is exactly the fNL-eq/orth
+        fnl_sum convention (coeff = template_coeff x #orderings). Verified vs S_0/K*S_0 to machine precision."""
+        from itertools import permutations
+        base = []
+        for p in set(permutations((-3,-3,0))): base.append((p, 1.0+0j))
+        for p in set(permutations((-3,-2,-1))): base.append((p, 1j*omega))
+        base.append(((-2,-2,-2), -(omega**2+1j*omega)))
+        if scheme == 'sm3':
+            terms = base
+        elif scheme == 'sm1':
+            terms = []
+            for (p,c) in base:
+                for leg in range(3):
+                    q = list(p); q[leg] += 1; terms.append((tuple(q), c))
+        else:
+            raise ValueError("integration_scheme must be 'sm3' or 'sm1', got %r"%scheme)
+        recipe = {}
+        for (p,c) in terms:
+            key = tuple(sorted(p)); recipe[key] = recipe.get(key, 0) + c
+        return recipe
+
+    def _build_feat_res_expsum(self, omega, kappa, Kmin, Kmax, kpow_shift=0, tol=1e-6, n_train=400,
+                               n_val=1500, n_base=700, n_stat=500, grid_omega=None, phi_factor=8.0, verb=False):
+        """Build the compressed exponential-sum basis for the fNL-feat-res u-integral. The estimator needs
+            cosh(pi w/2) Gamma(iw) K^{-iw+kpow_shift}  ~  sum_j W_j e^{-K u_j},  u_j=e^{x_j+i phi}/mu.
+        kpow_shift=0 for sm3 (reconstruct with the m=n bracket S_0, u-factor F=cosh Gamma K^{-iw}); kpow_shift=-1
+        for sm1 (reconstruct with the K-raised bracket K*S_0, so the u-factor is F/K=cosh Gamma K^{-iw-1} -- the
+        extra K is supplied by the raised bracket). Fit the kappa-INDEPENDENT scaled target on Chebyshev-in-logK
+        points using overcomplete rotated-contour candidates; select a minimal node subset by pivoted QR (ID);
+        refit complex weights by lstsq; grow N_t until max validation rel.err < tol. Returns (u_nodes, W) complex.
+        kappa=k_res/c_s enters only as the external phase kappa^{iw} applied at consumption (not here).
+
+        grid_omega (default None -> omega): frequency that defines the NODE grid (contour angle phi=arctan/8,
+        stationary-phase band, N_osc, and the pivoted-QR node count grown until grid_omega's own fit < tol).
+        The complex WEIGHTS W are always fit for the actual target `omega` on that node set. Setting
+        grid_omega>omega lets one node set (built for the largest frequency in a scan) be reused for all
+        smaller omega -- the dense grid over-resolves the smoother small-w target, giving equal/better
+        accuracy and much smaller |W| (verified: w=50 grid reproduces w=10 to ~1e-7 with max|W|~1)."""
+        from scipy.linalg import qr, lstsq
+        from scipy.special import loggamma
+        wg = omega if grid_omega is None else grid_omega   # frequency defining the node grid
+        # phi = contour rotation angle (numerical gauge; the exact answer is phi-independent). Default
+        # arctan(wg/8); phi_factor tunes it (larger factor -> smaller angle) for the phi-invariance check.
+        mu = np.sqrt(Kmin*Kmax); phi = np.arctan(wg/phi_factor); sphi = np.sin(phi)
+        # overcomplete candidate nodes on the rotated contour, denser in the (grid-freq) stationary-phase band
+        x_min = np.log(1e-12*mu/Kmax); x_max = np.log(32*mu/(Kmin*np.cos(phi)))
+        xs_lo = np.log(wg*mu/(Kmax*sphi)); xs_hi = np.log(wg*mu/(Kmin*sphi))
+        x = np.unique(np.concatenate([np.linspace(x_min, x_max, n_base),
+                                      np.linspace(max(xs_lo,x_min), min(xs_hi,x_max), n_stat)]))
+        u_cand = np.exp(x + 1j*phi)/mu
+        # log-safe scaled target cosh(pi w/2) Gamma(iw) K^{-iw+kpow_shift} (O(1) magnitude), kappa-independent
+        def _tgt(w, K):
+            lc = np.pi*w/2 + np.log1p(np.exp(-np.pi*w)) - np.log(2.)
+            return np.exp(lc + loggamma(1j*w)) * K**(-1j*w+kpow_shift)
+        tc = np.cos((2*np.arange(n_train)+1)/(2*n_train)*np.pi)
+        Ktr = np.exp(0.5*(np.log(Kmin)+np.log(Kmax)) + 0.5*(np.log(Kmax)-np.log(Kmin))*tc)
+        Kva = np.exp(np.linspace(np.log(Kmin), np.log(Kmax), n_val))
+        Atr = np.exp(-Ktr[:,None]*u_cand[None,:]); Ava = np.exp(-Kva[:,None]*u_cand[None,:])
+        ftr_g = _tgt(wg, Ktr); fva_g = _tgt(wg, Kva)          # grid-defining target (frequency wg)
+        ftr_o = _tgt(omega, Ktr); fva_o = _tgt(omega, Kva)    # actual target (frequency omega)
+        _, _, piv = qr(Atr, mode='economic', pivoting=True)
+        Nosc = int(np.ceil(wg/(2*np.pi)*np.log(Kmax/Kmin)))
+        # grow the node count until the GRID-DEFINING (wg) fit converges -> fixes the node set
+        W = None; Nt = max(2, Nosc-2)
+        for Nt in range(max(2,Nosc-2), min(len(u_cand), 20*Nosc+80)):
+            J = piv[:Nt]; Wg, *_ = lstsq(Atr[:,J], ftr_g)
+            errg = np.max(np.abs(Ava[:,J]@Wg - fva_g)/np.maximum(np.abs(fva_g), 1e-300))
+            if errg < tol: break
+        # fit the returned WEIGHTS for the actual target omega on that (wg-defined) node set
+        J = piv[:Nt]; W, *_ = lstsq(Atr[:,J], ftr_o)
+        err = np.max(np.abs(Ava[:,J]@W - fva_o)/np.maximum(np.abs(fva_o), 1e-300))
+        if verb:
+            gtag = "" if grid_omega is None else " [grid_omega=%.3g]"%wg
+            print("\tfNL-feat-res exp-sum: N_t=%d (N_osc=%d)%s, fit rel.err=%.2e, max|W|=%.2e"%(Nt,Nosc,gtag,err,np.max(np.abs(W))))
+        if err >= tol: print("\tWARNING: fNL-feat-res exp-sum did not reach tol=%.1e (got %.2e); increase candidate density or tol"%(tol,err))
+        # All selected nodes lie on the single ray arg(u)=phi, so the real t-grid t=|u|=e^x/mu fully
+        # describes them (u = t e^{i phi}). Return the real t-grid + phi (the rotated-contour parameter).
+        u_sel = u_cand[piv[:Nt]]
+        return np.ascontiguousarray(np.abs(u_sel)), phi, W
+
+    def set_feat_params(self, omega, kappa, verb=False):
+        """Re-set the fNL-feat-res (omega, kappa) on the EXISTING node grid, WITHOUT recomputing the
+        k-integral legs or any filtered maps. Only the (omega,kappa)-dependent 'assembly' quantities change:
+          - self.feat_W / self.u_weights : exp-sum weights, refit for `omega` on the SAME nodes
+          - self.feat_recipe             : bracket coefficients (omega-dependent)
+          - self.omega, feat_params['kres_cs']
+        The node grid (t_arr, phi, N_t) is UNCHANGED -- asserted below -- so any previously-computed legs
+        (flXs_exp_re/im) and filtered maps (f_exp_re/im) remain exactly valid. This is the primitive that
+        the *_feat_batch drivers use to sweep many (omega,kappa) while sharing all the expensive work.
+        Requires the class to have been built with a fixed grid_omega covering the whole scan (so the node
+        set does not depend on omega)."""
+        assert hasattr(self, '_feat_build_cfg'), "set_feat_params requires an fNL-feat-res template!"
+        cfg = self._feat_build_cfg
+        t_new, phi_new, W_new = self._build_feat_res_expsum(
+            omega, kappa, cfg['Kmin'], cfg['Kmax'], kpow_shift=cfg['kpow_shift'], tol=cfg['tol'],
+            grid_omega=cfg['grid_omega'], phi_factor=cfg['phi_factor'], verb=verb)
+        assert len(t_new) == self.N_t and np.array_equal(t_new, self.t_arr) and phi_new == self.feat_phi, \
+            ("set_feat_params changed the node grid -- the class must be built with a fixed grid_omega "
+             ">= every omega in the scan so the nodes are omega-independent (got N_t %d vs %d)."
+             % (len(t_new), self.N_t))
+        self.omega = omega
+        self.feat_params = dict(self.feat_params); self.feat_params['kres_cs'] = kappa
+        self.feat_W = W_new
+        self.u_weights = np.asarray(W_new, dtype=np.complex128, order='C')
+        self.feat_recipe = self._feat_bracket_recipe(omega, self.feat_scheme)
+
+    def _feat_prefactor(self):
+        """Complex scalar pref0 * kappa^{i omega} multiplying the fNL-feat-res bracket (cubic & linear)."""
+        omega = self.omega; kappa = self.feat_params['kres_cs']
+        return (2*np.pi**2*self.As)**2*omega**2/(4.*(omega+1j))*kappa**(1j*omega)
+
+    def _feat_num_cubic(self, proc_maps):
+        """Cubic (3-field) fNL-feat-res numerator term from pre-filtered data maps `proc_maps`
+        (keys f_exp_re/f_exp_im). Reads the CURRENT (omega,kappa,W,recipe); returns b3 (real scalar).
+        Identical arithmetic to the inline Bl_numerator branch -- shared by the single & batched paths."""
+        prefactor = self._feat_prefactor()
+        fre, fim = proc_maps['f_exp_re'], proc_maps['f_exp_im']
+        rw = self.r_weights['fNL-feat-res']
+        bracket = 0.+0.j
+        for (ka, kb, kc), coeff in self.feat_recipe.items():
+            bracket += coeff*self.utils.fnl_sum_2d_fullcomplex(
+                rw, self.u_weights, fre[ka], fim[ka], fre[kb], fim[kb], fre[kc], fim[kc])
+        return 1./3.*(prefactor*bracket).real*self.base.A_pix
+
+    def _feat_num_linear_one(self, proc_maps, this_proc_maps):
+        """One simulation's contribution to the fNL-feat-res linear (mean-field) term, using pre-filtered
+        data maps `proc_maps` and sim maps `this_proc_maps`. Reads the CURRENT (omega,kappa,W,recipe).
+        Returns the raw per-sim value b1_contrib = -(1/3) Re[C*bracket] A_pix (the caller averages over
+        sims, i.e. divides the SUM over sims by N_it). Identical arithmetic to the inline Bl_numerator
+        branch -- shared by the single & batched paths."""
+        C = self._feat_prefactor()
+        rw = self.r_weights['fNL-feat-res']
+        d_re, d_im = proc_maps['f_exp_re'], proc_maps['f_exp_im']
+        s_re, s_im = this_proc_maps['f_exp_re'], this_proc_maps['f_exp_im']
+        bracket = 0.+0.j
+        for key, gam in self.feat_recipe.items():
+            for s in range(3):
+                o1, o2 = [j for j in range(3) if j != s]
+                kd, ka, kb = key[s], key[o1], key[o2]
+                bracket += gam*self.utils.fnl_sum_2d_fullcomplex(
+                    rw, self.u_weights, d_re[kd], d_im[kd], s_re[ka], s_im[ka], s_re[kb], s_im[kb])
+        return -1./3.*(C*bracket).real*self.base.A_pix
+
+    def _feat_q_deriv(self, Qs_obs, Fexp_maps, radial_index):
+        """Accumulate the fNL-feat-res Q-derivative for the CURRENT (omega,kappa) into Qs_obs (shape
+        (2, npol, nlm)), for a single radial index, from the SHARED filtered maps Fexp_maps and legs. See the
+        long derivation note in compute_fisher_contribution for the 2/3 factor and the Re/Im expansion.
+        Shared by the single & batched MC-Fisher paths -- the (omega,kappa) dependence enters only through the
+        CURRENT prefactor C, weights feat_W, and recipe (Fexp_maps/legs are node-only, hence batch-shareable)."""
+        C = self._feat_prefactor()
+        rw = self.r_weights['fNL-feat-res'][radial_index]
+        leg_re = {kp: np.asarray(self.flXs_exp_re[kp][:,:,radial_index,:], order='C') for kp in self.feat_kpows}
+        leg_im = {kp: np.asarray(self.flXs_exp_im[kp][:,:,radial_index,:], order='C') for kp in self.feat_kpows}
+        expansion = [(('re','re','re'), 1., 0.), (('re','im','im'), -1., 0.),
+                     (('im','re','im'), -1., 0.), (('im','im','re'), -1., 0.),
+                     (('re','re','im'), 0., -1.), (('re','im','re'), 0., -1.),
+                     (('im','re','re'), 0., -1.), (('im','im','im'), 0., 1.)]
+        wnode = np.ascontiguousarray((2./3.)*rw*np.ones(self.N_t, dtype=np.float64))
+        for index in [0,1]:
+            Mre = {kp: np.ascontiguousarray(Fexp_maps[kp][index,:,0,:].real) for kp in self.feat_kpows}
+            Mim = {kp: np.ascontiguousarray(Fexp_maps[kp][index,:,0,:].imag) for kp in self.feat_kpows}
+            def _themap(kp, typ): return Mre[kp] if typ=='re' else Mim[kp]
+            inner_acc = {}   # (kpow, type) -> accumulated real inner map (N_t, Npix)
+            for key, gam in self.feat_recipe.items():
+                cc = C*gam*self.feat_W          # complex per-node array (includes W_node)
+                ccr = cc.real; cci = cc.imag
+                for types, fr, fi in expansion:
+                    coeff = fr*ccr + fi*cci     # per-node real coefficient of this triple product
+                    for s in range(3):
+                        o1, o2 = [j for j in range(3) if j != s]
+                        inner = _themap(key[o1], types[o1])*_themap(key[o2], types[o2])
+                        ok = (key[s], types[s])
+                        contrib = coeff[:,None]*inner
+                        inner_acc[ok] = contrib if ok not in inner_acc else inner_acc[ok]+contrib
+            for (kp_s, t_s), inner in inner_acc.items():
+                leg = leg_re[kp_s] if t_s=='re' else leg_im[kp_s]
+                Qs_obs[index] += self._transform_maps(np.ascontiguousarray(inner), leg, wnode)
 
     def _build_and_optimize_ru_grid(self, r_init, r_quad_weights, u_min=0.01, u_safety_factor=15, pts_per_period=15, tolerance=1e-3, verb=False, label='fNL-feat-res (r,u)'):
         """
@@ -1452,61 +1772,24 @@ class BSpecTemplate():
                 self.timers['fNL_summation'] += time.time()-t_init
 
             elif t=='fNL-feat-res':
-                # fNL-feat-res template, cubic (3-field) numerator term.
-                #
-                # NOTE: the original 'collapsed' representation (weight u^{i*omega-1-n}, n=0,1,3 for the
-                # M3,M2,M1 groups) is a genuinely DIVERGENT real integral for every group (Re(exponent)<=0
-                # always, since omega is real): it is only well-defined via the Gamma function's analytic
-                # continuation, not as a literal quadrature over a finite u_arr, which is exactly what this
-                # code does. No choice of u_arr converges to the correct B_res -- it diverges as u_min -> 0.
-                #
-                # Fix: represent each group's target e1^{n-i*omega} (e1=k1+k2+k3) via a Mellin exponent
-                # shifted to p = i*omega - n + m for integer m > n, giving Re(p) = m-n > 0 (a genuinely,
-                # absolutely convergent integral), and multiply back the 'missing' e1^m power explicitly
-                # via the multinomial theorem (which just adds an integer power to one of the 3 legs --
-                # still perfectly separable). Taking the minimal m = n+1 for each group makes the shifted
-                # exponent i*omega-n+m = i*omega+1 *independent of n*, so all groups share one weight u^{i*omega}.
-                # This turns the 3-term formula into 8 group-level terms (M1: 4, M2: 3, M3: 1), using 5 leg
-                # powers (k^{-3},k^{-2},k^{-1},k^0,k^{+1}) instead of 2 -- verified (mpmath, 25-digit, 3
-                # independent non-degenerate test points, both algebraically and via literal convergent
-                # numerical quadrature) to reproduce the same closed-form B_res as the old (divergent)
-                # collapsed formula.
-                #
-                # Those 8 terms collapse further to just 4 distinct leg-power multisets ({-3,-3,1},
-                # {-3,-2,0}, {-3,-1,-1}, {-2,-2,-1}), since fnl_sum_2d_complex(A,B,C) is trivially symmetric
-                # under reordering its 3 map arguments (it is just sum_pix A*B*C), so raw terms from
-                # DIFFERENT groups that reduce to the same *set* of 3 filtered maps give identical
-                # fnl_sum_2d_complex values and their (group-dependent, omega-only) coefficients simply add.
-                # Verified against the unmerged 8-group-term form on a random test map: rel diff ~1e-16.
-                #
-                # B_res/A_res = prefactor * int du u^{i*omega} * BRACKET(u) + c.c., with p_n(k)=k^{-n}e^{-ku}:
-                # BRACKET = (3c1)*p1(k1)p1(k2)p_{-3}(k3)              [{-3,-3,1}]
-                #         + (24c1+6c2)*p_{-3}(k1)p_{-2}(k2)p_0(k3)    [{-3,-2,0}]
-                #         + (18c1+6c2)*p_{-3}(k1)p_{-1}(k2)p_{-1}(k3) [{-3,-1,-1}]
-                #         + (36c1+15c2+3c3)*p_{-2}(k1)p_{-2}(k2)p_{-1}(k3)  [{-2,-2,-1}]
-                # (each with its implicit "+perms", already folded into the merged coefficient), where
-                # c1=1/[iw(iw-1)(iw-3)] (M1), c2=1/[iw(iw-1)] (M2), c3=1/iw (M3).
-                print("Computing fNL-feat-res template")
+                # fNL-feat-res template, cubic (3-field) numerator term. Compressed exponential-sum scheme
+                # (FEAT_NOTES.md Sessions 4-6). The u-integral factorises exactly: S(u)=S_0 e^{-Ku}, so
+                #   B_res/A_res = 2 Re[ pref0 * kappa^{iw} * F_hat(K) * S_0 ],   K = k1+k2+k3,
+                #   pref0 = (2 pi^2 As)^2 w^2 / (4(w+i)),   F_hat(K) = sum_j W_j e^{-K u_j}  (~ cosh Gamma K^{-iw}),
+                # with complex nodes u_j and complex weights W_j (cosh & Gamma(iw) folded into W_j). In the
+                # estimator, e^{-K u_j}=prod_a e^{-k_a u_j} is separable and S_0 is the m=n bracket (sm3) or
+                # its K-raised form (sm1). The bracket -> fnl_sum recipe (see _feat_bracket_recipe) uses the
+                # standard fNL-eq/orth convention (coeff = template_coeff x #orderings). Legs are COMPLEX;
+                # the complex triple product is contracted by fnl_sum_2d_fullcomplex (Re/Im expanded, 1j at
+                # the end). u_weights = W_j (NO u^{iw} power -- F is represented directly).
+                print("Computing fNL-feat-res template (%s, exp-sum, N_t=%d)"%(self.feat_scheme, self.N_t))
 
                 t_init = time.time()
-                omega = self.omega
-                kappa = self.feat_params['kres_cs']
-                prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-                u_weight = self.u_weights*self.u_arr**(1j*omega)  # shared by every group now
-                coeff1 = 1./(1j*omega*(1j*omega-1)*(1j*omega-3))  # M1 (base legs -3,-3,-3; shift m=4)
-                coeff2 = 1./(1j*omega*(1j*omega-1))               # M2 (base legs -2,-2,-3; shift m=2)
-                coeff3 = 1./(1j*omega)                            # M3 (base legs -2,-2,-2; shift m=1)
-
-                fm3, fm2, fm1, f0, fp1 = (proc_maps['f_exp'][-3], proc_maps['f_exp'][-2], proc_maps['f_exp'][-1],
-                                          proc_maps['f_exp'][0], proc_maps['f_exp'][1])
-
-                bracket  = (3.*coeff1)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, fm3, fp1)                      # {-3,-3,1}
-                bracket += (24.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, fm2, f0)             # {-3,-2,0}
-                bracket += (18.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, fm1, fm1)            # {-3,-1,-1}
-                bracket += (36.*coeff1+15.*coeff2+3.*coeff3)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm2, fm2, fm1) # {-2,-2,-1}
-
-                summ = prefactor*bracket
-                b3_num[index] = 1./3.*summ.real*self.base.A_pix
+                # Assembly extracted to _feat_num_cubic (shared by the batched driver). Normalization:
+                # verified (FEAT_NOTES Session 6) that (prefactor*bracket) reproduces the PREVIOUS m=n+1
+                # code's complex `summ` to machine precision (ratio 1.0, phase ~1e-16, all w,kappa), so the
+                # previous (correct) (1/3)*summ.real*A_pix wrapper carries over UNCHANGED.
+                b3_num[index] = self._feat_num_cubic(proc_maps)
                 index += 1
                 #TODO: add b1_num
                 self.timers['fNL_summation'] += time.time()-t_init
@@ -1637,41 +1920,15 @@ class BSpecTemplate():
                         self.timers['fNL_summation'] += time.time()-t_init
 
                     elif t=='fNL-feat-res':
-                        # Linear term for the genuinely-convergent representation (see the cubic-term
-                        # comment above for the Mellin-shift derivation). Replace 1 of the 3 legs with data
-                        # and the other 2 with simulations, summed over the 3 cyclic rotations of each of
-                        # the 36 raw cubic-term pieces (108 raw linear sub-terms). Since fnl_sum_2d_complex
-                        # is trivially symmetric under reordering its 3 map arguments, raw sub-terms that
-                        # reduce to the same (data-leg-power, {sim-leg-power multiset}) collapse to a single
-                        # call; this leaves just 9 distinct combinations (derived combinatorially and
-                        # verified against the fully explicit, unmerged form on an actual SHT-based
-                        # numerator run to machine precision).
+                        # Linear (mean-field) term for the compressed exp-sum rep (sm3/sm1). Same recipe and
+                        # (1/3)Re[C*.]A_pix wrapper as the cubic numerator, but with 2 of the 3 legs replaced by
+                        # a simulation and summed over the 3 data-placements (which leg is data), averaged over
+                        # N_it sims. Complex data/sim maps -> fnl_sum_2d_fullcomplex (verified). Both sim legs use
+                        # the SAME sim (this_proc_maps); the sim-average estimates the disconnected <a a> piece.
                         t_init = time.time()
-                        omega = self.omega
-                        kappa = self.feat_params['kres_cs']
-                        prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-                        u_weight = self.u_weights*self.u_arr**(1j*omega)
-                        coeff1 = 1./(1j*omega*(1j*omega-1)*(1j*omega-3))
-                        coeff2 = 1./(1j*omega*(1j*omega-1))
-                        coeff3 = 1./(1j*omega)
-
-                        fm3, fm2, fm1, f0, fp1 = (proc_maps['f_exp'][-3], proc_maps['f_exp'][-2], proc_maps['f_exp'][-1],
-                                                  proc_maps['f_exp'][0], proc_maps['f_exp'][1])
-                        sfm3, sfm2, sfm1, sf0, sfp1 = (this_proc_maps['f_exp'][-3], this_proc_maps['f_exp'][-2], this_proc_maps['f_exp'][-1],
-                                                       this_proc_maps['f_exp'][0], this_proc_maps['f_exp'][1])
-
-                        bracket  = (6.*coeff1)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, sfm3, sfp1)
-                        bracket += (24.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, sfm2, sf0)
-                        bracket += (18.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm3, sfm1, sfm1)
-                        bracket += (24.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm2, sfm3, sf0)
-                        bracket += (72.*coeff1+30.*coeff2+6.*coeff3)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm2, sfm2, sfm1)
-                        bracket += (36.*coeff1+12.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm1, sfm3, sfm1)
-                        bracket += (36.*coeff1+15.*coeff2+3.*coeff3)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fm1, sfm2, sfm2)
-                        bracket += (24.*coeff1+6.*coeff2)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, f0, sfm3, sfm2)
-                        bracket += (3.*coeff1)*self.utils.fnl_sum_2d_complex(self.r_weights[t], u_weight, fp1, sfm3, sfm3)
-
-                        summ = prefactor*bracket
-                        b1_num[index] += -1./3.*summ.real*self.base.A_pix/self.N_it
+                        # Assembly extracted to _feat_num_linear_one (shared by the batched driver); the
+                        # per-sim value already carries -(1/3)Re[C*bracket]A_pix, averaged here over N_it.
+                        b1_num[index] += self._feat_num_linear_one(proc_maps, this_proc_maps)/self.N_it
                         index += 1
                         self.timers['fNL_summation'] += time.time()-t_init
 
@@ -1720,9 +1977,61 @@ class BSpecTemplate():
         else:
             return b_num
 
+    @_timer_func('numerator')
+    def Bl_numerator_feat_batch(self, data, feat_params_list, include_linear_term=True, verb=False, input_type='map', return_cubic=False):
+        """BATCHED fNL-feat-res numerator for a SET of (omega,kappa) sharing the current node + radial grid.
+
+        The (omega,kappa)-INDEPENDENT work is done ONCE and reused across the whole batch:
+          - S^-1.data and its filtered feature maps (the data SHTs), and
+          - each bias simulation's filtered feature maps (the sim SHTs, the dominant cost of the linear term).
+        Only the cheap complex triple-product 'assembly' (fnl_sum_2d_fullcomplex, weighted by the per-omega W
+        and recipe and the pref0*kappa^{iw} scalar) is looped over the batch. Returns b_num (nparam,) and, if
+        return_cubic, also b3_num (nparam,) -- each element equal to the corresponding single-param
+        Bl_numerator run to machine precision.
+
+        Assumes 'fNL-feat-res' is the (only) template. feat_params_list: list of (omega,kappa) or dicts."""
+        assert self.templates == ['fNL-feat-res'], "Bl_numerator_feat_batch supports a lone fNL-feat-res template"
+        if self.ints_1d and (not hasattr(self, 'r_arr')):
+            raise Exception("Need radial integration points (prepare a common r-grid) first!")
+        if include_linear_term and (not hasattr(self, 'preload')):
+            raise Exception("Need to generate or specify bias simulations!")
+        params = [p if isinstance(p, (tuple, list)) else (p['omega'], p['kres_cs']) for p in feat_params_list]
+        nparam = len(params)
+
+        # S^-1.data -> filtered feature maps (ONE set of data SHTs, shared by every param)
+        if input_type == 'Sinv_map':
+            h_data_lm = data.copy()
+        else:
+            t_init = time.time()
+            h_data_lm = np.asarray(self.applySinv(data, input_type=input_type, lmax=self.lmax)[:, self.lminfilt], order='C')
+            self.timers['Sinv'] += time.time()-t_init
+        if verb: print("# Batched feat numerator: filtering data (shared across %d params)" % nparam)
+        proc_maps = self._apply_all_filters(h_data_lm)
+
+        # cubic (3-field) term, per param
+        b3_num = np.zeros(nparam)
+        for ip, (om, ka) in enumerate(params):
+            self.set_feat_params(om, ka)
+            b3_num[ip] = self._feat_num_cubic(proc_maps)
+
+        # linear (mean-field) term: build each sim's maps ONCE, then loop params
+        b1_num = np.zeros(nparam)
+        if include_linear_term:
+            for isim in range(self.N_it):
+                if verb: print("# Batched feat numerator: linear term, sim %d of %d" % (isim+1, self.N_it))
+                this_proc_maps = self.proc_maps[isim] if self.preload else self.load_sim_data(isim)
+                for ip, (om, ka) in enumerate(params):
+                    self.set_feat_params(om, ka)
+                    b1_num[ip] += self._feat_num_linear_one(proc_maps, this_proc_maps)/self.N_it
+
+        b_num = b3_num + b1_num if include_linear_term else b3_num
+        if return_cubic:
+            return b_num, b3_num
+        return b_num
+
     ### OPTIMIZATION
     @_timer_func('optimization')
-    def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_split=None, split_index=None, initial_r_points=None, verb=False, ideal_only=False, input_derivatives={}):
+    def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_split=None, split_index=None, initial_r_points=None, verb=False, ideal_only=False, input_derivatives={}, r_fine_lo=None, r_fine_hi=None):
         """
         Compute the 1D radial sampling points and weights via optimization (as in Smith & Zaldarriaga 06), up to some tolerance in the Fisher distance.
         Optimization will be done for each template, analytically computing the 'distance' between template approximations
@@ -1753,8 +2062,13 @@ class BSpecTemplate():
         if reduce_r>3:
             print("## Caution: very sparse r-sampling requested; computation may be inaccurate")
         
-        # Create radial array
-        r_raw = np.asarray(list(np.arange(1,self.r_star*0.95,50*reduce_r))+list(np.arange(self.r_star*0.95,self.r_hor*1.05,2.5*reduce_r))+list(np.arange(self.r_hor*1.05,self.r_hor+5000,50*reduce_r)))
+        # Create radial array. Fine-sampling window [flo, fhi] (dense 2.5*reduce_r spacing); coarse
+        # 50*reduce_r elsewhere. Defaults bracket recombination generously (r_star*0.95, r_hor*1.05);
+        # r_fine_lo/r_fine_hi override them (e.g. shrink to the actual r-support to cut N_r -- verified
+        # negligible for fNL-feat-res, whose support is a ~400-wide spike at r_star). Tails span [1, r_hor+5000].
+        flo = self.r_star*0.95 if r_fine_lo is None else r_fine_lo
+        fhi = self.r_hor*1.05 if r_fine_hi is None else r_fine_hi
+        r_raw = np.asarray(list(np.arange(1,flo,50*reduce_r))+list(np.arange(flo,fhi,2.5*reduce_r))+list(np.arange(fhi,self.r_hor+5000,50*reduce_r)))
 
         #r_raw = np.asarray(list(np.geomspace(1,999,1000))+list(np.arange(1000,self.r_star*0.95,50*reduce_r))+list(np.arange(self.r_star*0.95,self.r_hor*1.05,5*reduce_r))+list(np.arange(self.r_hor*1.05,self.r_hor+5000,50*reduce_r)))
         
@@ -2168,41 +2482,21 @@ class BSpecTemplate():
                         # below. Confirmed by direct numerical differentiation of the (independently-verified)
                         # cubic numerator w.r.t. a single a_lm mode: this code's Q_lm was exactly 3x the true
                         # derivative before this 1/3 was added (ratio 3.006, both real and imaginary parts).
-                        if (verb and radial_index==0): print("Computing Q-derivative for fNL-feat-res")
-                        omega = self.omega
-                        kappa = self.feat_params['kres_cs']
-                        prefactor = -0.25*(omega+3j)*(2*np.pi**2*self.As)**2*omega**2*np.cosh(np.pi*omega/2)*kappa**(1j*omega)
-                        u_weight = self.u_weights*self.u_arr**(1j*omega)
-                        coeff1 = 1./(1j*omega*(1j*omega-1)*(1j*omega-3))
-                        coeff2 = 1./(1j*omega*(1j*omega-1))
-                        coeff3 = 1./(1j*omega)
-                        rw = self.r_weights[t][radial_index]
-                        WC1 = np.asarray(2.*np.real(prefactor*coeff1*u_weight)*rw/3., order='C')
-                        WC2 = np.asarray(2.*np.real(prefactor*coeff2*u_weight)*rw/3., order='C')
-                        WC3 = np.asarray(2.*np.real(prefactor*coeff3*u_weight)*rw/3., order='C')
-
-                        filt_m3 = np.asarray(self.flXs_exp[-3][:,:,radial_index,:], order='C')
-                        filt_m2 = np.asarray(self.flXs_exp[-2][:,:,radial_index,:], order='C')
-                        filt_m1 = np.asarray(self.flXs_exp[-1][:,:,radial_index,:], order='C')
-                        filt_0  = np.asarray(self.flXs_exp[0][:,:,radial_index,:], order='C')
-                        filt_p1 = np.asarray(self.flXs_exp[1][:,:,radial_index,:], order='C')
-
-                        for index in [0,1]:
-                            fm3 = np.asarray(Fexp_maps[-3][index,:,0,:], order='C')
-                            fm2 = np.asarray(Fexp_maps[-2][index,:,0,:], order='C')
-                            fm1 = np.asarray(Fexp_maps[-1][index,:,0,:], order='C')
-                            f0  = np.asarray(Fexp_maps[0][index,:,0,:], order='C')
-                            fp1 = np.asarray(Fexp_maps[1][index,:,0,:], order='C')
-
-                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fp1, fm3), filt_m3, 6.*WC1)
-                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm2, f0), filt_m3, 24.*WC1+6.*WC2)
-                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm1, fm1), filt_m3, 18.*WC1+6.*WC2)
-                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm3, f0), filt_m2, 24.*WC1+6.*WC2)
-                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm2, fm1), filt_m2, 72.*WC1+30.*WC2+6.*WC3)
-                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm3, fm1), filt_m1, 36.*WC1+12.*WC2)
-                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm2, fm2), filt_m1, 36.*WC1+15.*WC2+3.*WC3)
-                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm3, fm2), filt_0, 24.*WC1+6.*WC2)
-                            Qs[index,q_index] += self._transform_maps(self.utils.multiply(fm3, fm3), filt_p1, 3.*WC1)
+                        # Compressed exp-sum Q-derivative (sm3/sm1). Convention (derived analytically & verified
+                        # vs fNL-loc/eq): Q_lm = 2 * d/dfield[ b3 / A_pix ]  (product rule; NO A_pix; factor 2).
+                        # b3/A_pix = (1/3) Re[ C * bracket ], bracket = sum_key gamma_key fnl_sum_c(M_k0,M_k1,M_k2),
+                        # C = pref0 kappa^{iw}, fnl_sum_c = sum_{r,node} w_r W_node sum_pix M M M (COMPLEX maps).
+                        # Since the maps are complex, Re[cc * M_a M_b M_c] (cc = C gamma_key W_node, complex per-node)
+                        # is expanded into REAL triple products over the {re,im} leg maps:
+                        #   Re[cc P] = Re(cc) Re(P) - Im(cc) Im(P),
+                        #   Re(P) = RRR - RII - IRI - IIR,   Im(P) = RRI + RIR + IRR - III   (R=Mre, I=Mim per slot).
+                        # The product rule then uses the REAL _transform_maps on real inner products with the real
+                        # re/im legs (leg of a removed Mre_p map = flXs_exp_re[p]; of Mim_p = flXs_exp_im[p]) -- no
+                        # complex SHT, no Wirtinger conjugate. Overall factor 2*(1/3) = 2/3; per-node coeff folded
+                        # into the inner map so contributions sharing an outer leg merge to one transform.
+                        if (verb and radial_index==0): print("Computing Q-derivative for fNL-feat-res (%s)"%self.feat_scheme)
+                        # Assembly extracted to _feat_q_deriv (shared by the batched MC-Fisher driver).
+                        self._feat_q_deriv(Qs[:,q_index], Fexp_maps, radial_index)
                         q_index += 1
 
                     elif 'neural' in t:
@@ -2347,9 +2641,86 @@ class BSpecTemplate():
         # Compute Fisher matrix as an outer product
         fish = self._assemble_fish(Q3_Sinv, Q3_Ainv, sym=False)
         if verb: print("\n# Fisher matrix contribution %d computed successfully!"%seed)
-        
+
         return fish
-        
+
+    @_timer_func('fisher')
+    def compute_fisher_contribution_feat_batch(self, seed, feat_params_list, verb=False):
+        """BATCHED MC Fisher contribution (single GRF-pair `seed`) for a SET of (omega,kappa) sharing the
+        current node + radial grid. The (omega,kappa)-INDEPENDENT work -- the two GRFs, their S^-1/A^-1
+        weighting, and the per-radial-index filtered feature maps (the dominant SHT cost) -- is done ONCE and
+        reused; only the cheap per-param Q-derivative assembly (_feat_q_deriv) is looped over the batch.
+
+        Returns fish (nparam, nparam): the [i,i] diagonal is param i's own Fisher contribution (equal to the
+        single-param compute_fisher_contribution(seed) to machine precision); off-diagonals are the cross-
+        Fisher between the different feature templates (computed for free from the shared maps).
+
+        Assumes 'fNL-feat-res' is the (only) template. feat_params_list: list of (omega,kappa) or dicts."""
+        assert self.templates == ['fNL-feat-res'], "compute_fisher_contribution_feat_batch supports a lone fNL-feat-res template"
+        if self.ints_1d and (not hasattr(self, 'r_arr')):
+            raise Exception("Need radial integration points (prepare a common r-grid) first!")
+        params = [p if isinstance(p, (tuple, list)) else (p['omega'], p['kres_cs']) for p in feat_params_list]
+        nparam = len(params)
+        print("Computing BATCHED feat MC Fisher (seed %d, %d params)" % (seed, nparam))
+
+        # two GRFs (shared across all params)
+        t_init = time.time()
+        a_maps = []
+        for ii in range(2):
+            if self.ones_mask:
+                a_maps.append(self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic', lmax=self.lmax, deconvolve_beam=True))
+            else:
+                a_maps.append(self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic', deconvolve_beam=True))
+        self.timers['fish_grfs'] += time.time()-t_init
+
+        def compute_Q3(weighting):
+            t_init = time.time()
+            if weighting == 'Sinv':
+                if self.ones_mask:
+                    Uinv_a_lms = [np.asarray(self.applySinv(self.base.beam_lm[:,self.base.l_arr<=self.lmax]*a_lm, input_type='harmonic', lmax=self.lmax)[:,self.lminfilt], order='C') for a_lm in a_maps]
+                else:
+                    Uinv_a_lms = [np.asarray(self.applySinv(self.mask*self.base.to_map(self.base.beam_lm*a_lm), lmax=self.lmax)[:,self.lminfilt], order='C') for a_lm in a_maps]
+                self.timers['Sinv'] += time.time()-t_init
+            elif weighting == 'Ainv':
+                if self.ones_mask:
+                    Uinv_a_lms = [np.asarray(self.base.applyAinv(a_lm, input_type='harmonic', lmax=self.lmax)[:,self.lminfilt], order='C') for a_lm in a_maps]
+                else:
+                    Uinv_a_lms = [np.asarray(self.base.applyAinv(a_lm, input_type='harmonic')[:,self.lfilt], order='C') for a_lm in a_maps]
+                self.timers['Ainv'] += time.time()-t_init
+
+            # nparam observables (one per feat param); Q11/Q22 (2) x nparam x npol x nlm
+            Qs = np.zeros((2, nparam, 1+2*self.pol, np.sum(self.lfilt)), dtype=np.complex128, order='C')
+            for radial_index in range(self.N_r):
+                if verb and radial_index == 0: print("Creating F[exp] maps (shared across params)")
+                Fexp_maps = self._filter_pair(Uinv_a_lms, 'F_exp', radial_index)   # SHARED SHTs
+                for ip, (om, ka) in enumerate(params):
+                    self.set_feat_params(om, ka)
+                    self._feat_q_deriv(Qs[:, ip], Fexp_maps, radial_index)
+            # S^-1 / m-weight each observable (explicit loop over nparam; _weight_Q_maps only spans total_size)
+            if weighting == 'Ainv' and verb: print("Applying S^-1 weighting to output")
+            for findex in range(2):
+                for ip in range(nparam):
+                    if weighting == 'Ainv':
+                        full_Q = np.zeros((1+2*self.pol, len(self.lminfilt)), dtype=np.complex128)
+                        full_Q[:, self.lminfilt] = self.beam_lm*Qs[findex, ip]
+                        t0 = time.time()
+                        if self.ones_mask:
+                            Qs[findex, ip] = self.applySinv(full_Q, input_type='harmonic', lmax=self.lmax)[:, self.lminfilt]
+                        else:
+                            Qs[findex, ip] = self.applySinv(self.mask*self.base.to_map(full_Q, lmax=self.lmax), lmax=self.lmax)[:, self.lminfilt]
+                        self.timers['Sinv'] += time.time()-t0
+                    elif weighting == 'Sinv':
+                        Qs[findex, ip] = self.m_weight*Qs[findex, ip]
+            return Qs.reshape(2, nparam, -1)
+
+        if verb: print("\n# Computing Q3 map for S^-1 weighting")
+        Q3_Sinv = compute_Q3('Sinv')
+        if verb: print("\n# Computing Q3 map for A^-1 weighting")
+        Q3_Ainv = compute_Q3('Ainv')
+        fish = self._assemble_fish(Q3_Sinv, Q3_Ainv, sym=False)
+        if verb: print("\n# Batched feat Fisher contribution %d computed successfully!" % seed)
+        return fish
+
     def compute_fisher(self, N_it, verb=False):
         """
         Compute the Fisher matrix using N_it realizations. These are run in serial (since the code is already parallelized).
