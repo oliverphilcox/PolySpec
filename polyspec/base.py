@@ -190,7 +190,7 @@ class PolySpec():
             self.n_SHTs_forward += input_vec.shape[0]
 
             if self.backend == 'healpix':
-                return healpy.map2alm(input_vec, pol=False, iter=0, lmax=lmax)
+                return healpy.map2alm(input_vec, pol=False, iter=0, lmax=lmax).reshape(len(input_vec),-1)
             
             elif self.backend == 'ducc':
                 norm_factor = np.pi / (3. * self.Nside**2)
