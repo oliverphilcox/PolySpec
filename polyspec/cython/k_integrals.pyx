@@ -4,7 +4,7 @@ from __future__ import print_function
 import numpy as np
 cimport numpy as np
 cimport cython
-from libc.math cimport abs, M_PI, M_E, sqrt, exp, pow as dpow, sin
+from libc.math cimport abs, M_PI, M_E, sqrt, exp, pow as dpow, sin, cos
 from cython.parallel import prange
 
 cdef extern from "gsl/gsl_errno.h" nogil:
@@ -348,6 +348,42 @@ cpdef void q_integral(double[:] k_arr, double[:,:,::1] Tl_arr, double[:,:,::1] j
                     f_high = kprod[ik]*Tl_arr[1,lmin+il,ik]*jlkr[il,ir,ik]
                     integs[lmin+il,1,ir] += lpref*(k_arr[ik]-k_arr[ik-1])*(f_low+f_high)
                     f_low = f_high
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cpdef void q_integral_exp(double[:] k_arr, double kpow, double[:] s_re, double[:] s_im, double[:,:,::1] Tl_arr, double[:,:,::1] jlkr,
+                     int lmin, int lmax, int nthreads, np.ndarray[np.float64_t,ndim=4] _integs_re, np.ndarray[np.float64_t,ndim=4] _integs_im):
+    """Compute the q_l^X(r,s) integral including a factor of k^{kpow} e^{-sk} for complex s with the trapezium rule."""
+
+    cdef int il, ik, ir, iu, ipol, nk = len(k_arr), nr = _integs_re.shape[2], nu = _integs_re.shape[3], nl = lmax+1-lmin, npol = len(Tl_arr)
+    cdef double[:] kprod = np.zeros((nk),dtype=np.float64)
+    cdef double lpref, base, damp, ph, fr_low, fr_high, fi_low, fi_high
+    cdef double[:,:,:,::1] integs_re = _integs_re
+    cdef double[:,:,:,::1] integs_im = _integs_im
+
+    # Compute k-dependent piece
+    for ik in prange(nk,nogil=True,schedule='static',num_threads=nthreads):
+        kprod[ik] = 2./M_PI*k_arr[ik]*k_arr[ik]/2.*dpow(k_arr[ik], kpow)
+
+    # Perform sum for each polarization
+    for il in prange(nl,nogil=True,schedule='static',num_threads=nthreads):
+        lpref = dpow(-1.,lmin+il)
+        for ipol in xrange(npol):
+            for ir in xrange(nr):
+                for iu in xrange(nu):
+
+                    # Compute trapezium rule
+                    base = kprod[0]*Tl_arr[ipol,lmin+il,0]*jlkr[il,ir,0]
+                    damp = exp(-k_arr[0]*s_re[iu]); ph = k_arr[0]*s_im[iu]
+                    fr_low = base*damp*cos(ph); fi_low = -base*damp*sin(ph)
+                    for ik in xrange(1,nk):
+                        base = kprod[ik]*Tl_arr[ipol,lmin+il,ik]*jlkr[il,ir,ik]
+                        damp = exp(-k_arr[ik]*s_re[iu]); ph = k_arr[ik]*s_im[iu]
+                        fr_high = base*damp*cos(ph); fi_high = -base*damp*sin(ph)
+                        integs_re[lmin+il,ipol,ir,iu] += lpref*(k_arr[ik]-k_arr[ik-1])*(fr_low+fr_high)
+                        integs_im[lmin+il,ipol,ir,iu] += lpref*(k_arr[ik]-k_arr[ik-1])*(fi_low+fi_high)
+                        fr_low = fr_high; fi_low = fi_high
 
 @cython.boundscheck(False)
 @cython.wraparound(False)

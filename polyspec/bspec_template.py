@@ -3,7 +3,8 @@
 
 import numpy as np
 import time
-from scipy.special import gamma, p_roots, legendre_p_all
+from scipy.special import gamma, p_roots, legendre_p_all, gammaln, loggamma
+from scipy.linalg import qr, lstsq
 from .cython.k_integrals import *
 from .cython.ideal_fisher import *
 from .cython.fNL_utils import *
@@ -17,7 +18,7 @@ class BSpecTemplate():
     - base: PolySpec class
     - mask: HEALPix mask applied to data. We can optionally specify a vector of three masks for [T, Q, U].
     - applySinv: function which returns S^-1 ~ P^dag Cov^{-1} in harmonic space, when applied to a given input map, where P = Mask * Beam.
-    - templates: types of templates to compute e.g. [fNL-loc, fNL-eq, fNL-orth, fNL-orth2, neural-0, neural-2, binned, ..]
+    - templates: types of templates to compute e.g. [fNL-loc, fNL-eq, fNL-orth, fNL-orth2, fNL-feat-res, fNL-feat-sharp, neural-0, neural-2, binned, ..]
     - k_arr, Tl_arr: k-array, plus T- and (optionally) E-mode transfer functions for all ell. Required for all primordial templates.
     - lmin, lmax: minimum/maximum ell (inclusive)
     - ns, As, k_pivot: primordial power spectrum parameters
@@ -28,8 +29,9 @@ class BSpecTemplate():
     - neural_inputs: Input set of neural-network bispectrum templates (only used if "neural-0, neural-1, ..." is in templates). These must take the form ({weights_0, alpha_0, beta_0, [gamma_0]}, {weights_1, alpha_1, beta_1, [gamma_1]}, ...), where alpha/beta/gamma are functions of k and i, for i = 0 ... len(weights)-1. 
     - k_bin_edges: List of Fourier-bin edges for the binned estimator: (k_1, k_2, k_3, ...). If specified, "binned" should be in templates.
     - k_triplet_ids: List of {bin1, bin2, bin3, bin-id}. If specified, "binned" should be in templates.
+    - feat_params: Feature template parameters: {omega, [omega_fid, K_min, K_max]} for "fNL-feat-res" (giving cosine and sine templates), and {n, lam, Delta, theta} for "fNL-feat-sharp" (with amplitudes normalized by 1/((n-1)Gamma(n))). These require input radial sampling points.
     """
-    def __init__(self, base, mask, applySinv, templates, lmin, lmax,  k_arr=[], Tl_arr=[], r_arr=[], ns=0.96, As=2.1e-9, k_pivot=0.05, r_values = [], r_weights = {}, C_Tphi=[], C_Ephi=[], C_lens_weight = {}, r_star=None, r_hor=None, neural_inputs=None, k_bin_edges=None, k_triplet_ids=None):
+    def __init__(self, base, mask, applySinv, templates, lmin, lmax,  k_arr=[], Tl_arr=[], r_arr=[], ns=0.96, As=2.1e-9, k_pivot=0.05, r_values = [], r_weights = {}, C_Tphi=[], C_Ephi=[], C_lens_weight = {}, r_star=None, r_hor=None, neural_inputs=None, k_bin_edges=None, k_triplet_ids=None, feat_params=None):
         # Read in attributes
         self.base = base
         self.mask = mask
@@ -45,6 +47,7 @@ class BSpecTemplate():
         self.neural_inputs = neural_inputs
         self.k_bin_edges = k_bin_edges
         self.k_triplet_ids = k_triplet_ids
+        self.feat_params = feat_params
         
         # Create primordial power spectrum function
         print("Primordial Spectrum: n_s = %.2f, A_s = %.2e, k_pivot = %.2f"%(self.ns, self.As, self.k_pivot));
@@ -143,7 +146,7 @@ class BSpecTemplate():
         """Check input templates and log which quantities to compute."""
         
         # Check correct templates are being used and print them
-        self.all_templates_1d = ['fNL-loc','fNL-eq','fNL-orth','fNL-orth2','binned']
+        self.all_templates_1d = ['fNL-loc','fNL-eq','fNL-orth','fNL-orth2','fNL-feat-res','fNL-feat-sharp','binned']
         self.all_templates = self.all_templates_1d+['isw-lensing']
         ii = 0
         neural_inds = []
@@ -191,6 +194,37 @@ class BSpecTemplate():
         if 'fNL-orth2' in templates:
             self.to_compute.append(['f_m2','f_m1','f_p0','f_p1','f_p2','f_p3','f_p4'])
             self.ints_1d = True
+        
+        self.feat = {}
+        if 'fNL-feat-res' in templates:
+            # Check inputs
+            assert self.feat_params is not None and 'omega' in self.feat_params, "Must specify omega for the fNL-feat-res template!"
+            omega = np.atleast_1d(np.asarray(self.feat_params['omega'],dtype=np.float64))
+            
+            # Compute nodes and weights, then define cosine and sine template coefficients
+            nodes, weights = self._resonant_weights(omega, self.feat_params.get('omega_fid', omega.max()), self.feat_params.get('K_min', 3e-4), self.feat_params.get('K_max', 0.6))
+            coeffs = ((2*np.pi**2*self.As)**2*omega[:,None]**2/(4*(omega[:,None]+1.0j))*np.asarray([3.+0.*omega, 6.0j*omega, -omega**2-1.0j*omega]).T)[:,:,None]*weights[:,None,:]
+            self.feat['fNL-feat-res'] = {'nodes': nodes, 'kpows': [-3,-2,-1,0], 'keys': [(-3,-3,0),(-3,-2,-1),(-2,-2,-2)], 'coeffs': np.stack([coeffs,1.0j*coeffs],axis=1).reshape(-1,3,len(nodes))}
+            self.ints_1d = True
+        
+        if 'fNL-feat-sharp' in templates:
+            # Check inputs
+            assert self.feat_params is not None and np.all([k in self.feat_params for k in ['n','lam','Delta','theta']]), "Must specify n, lam, Delta and theta for the fNL-feat-sharp template!"
+            n_vals, lams = np.atleast_1d(self.feat_params['n']), np.atleast_1d(self.feat_params['lam'])
+            assert len(n_vals)==len(lams), "n and lam must have the same length!"
+            assert np.min(n_vals)>3, "Sharp templates require n > 3!"
+            
+            # Compute weights on a shared lattice of nodes
+            h, theta = self.feat_params['Delta'], self.feat_params['theta']
+            js, weights = zip(*[self._sharp_weights(n, lam, h, theta) for n, lam in zip(n_vals, lams)])
+            j_all = np.unique(np.concatenate(js))
+            coeffs = np.zeros((len(n_vals),3,len(j_all)),dtype=np.complex128)
+            for i in range(len(n_vals)):
+                coeffs[i][:,np.searchsorted(j_all,js[i])] = -1.0j*np.pi**4*self.As**2*np.asarray([lams[i]**3,3*lams[i],1.])[:,None]*weights[i]
+            self.feat['fNL-feat-sharp'] = {'nodes': np.exp(j_all*h+1.0j*(np.pi/2-theta)), 'kpows': [-3,-2], 'keys': [(-3,-3,-3),(-3,-2,-2),(-2,-2,-2)], 'coeffs': coeffs}
+            self.ints_1d = True
+        for t in self.feat:
+            print("%s: using %d nodes for %d templates"%(t,len(self.feat[t]['nodes']),len(self.feat[t]['coeffs'])))
         
         if 'binned' in templates:
             # Check inputs
@@ -296,6 +330,55 @@ class BSpecTemplate():
             self.total_size = len(self.templates)
         else:
             self.total_size = len(self.templates)-1+self.n_binned
+        self.total_size += np.sum([len(self.feat[t]['coeffs'])-1 for t in self.feat],dtype=int)
+    
+    @staticmethod
+    def _resonant_weights(omega, omega_fid, K_min, K_max, tol=1e-4):
+        """Compute nodes s_j and weights W_j satisfying cosh(pi omega/2)Gamma(i omega)K^{-i omega} = Sum_j W_j e^{-s_j K}."""
+        
+        # Define candidate nodes on a rotated contour
+        mu, phi = np.sqrt(K_min*K_max), np.arctan(omega_fid/8.)
+        x_min, x_max = np.log(1e-12*mu/K_max), np.log(32*mu/(K_min*np.cos(phi)))
+        x = np.unique(np.concatenate([np.linspace(x_min,x_max,700),np.linspace(max(np.log(omega_fid*mu/(K_max*np.sin(phi))),x_min),min(np.log(omega_fid*mu/(K_min*np.sin(phi))),x_max),500)]))
+        s = np.exp(x+1.0j*phi)/mu
+        
+        # Define training and validation points
+        K_train = np.exp(np.log(mu)+0.5*np.log(K_max/K_min)*np.cos((2*np.arange(400)+1)/800.*np.pi))
+        K_val = np.geomspace(K_min,K_max,1500)
+        target = lambda w, K: np.exp(np.pi*w/2+np.log1p(np.exp(-np.pi*w))-np.log(2.)+loggamma(1.0j*w)-1.0j*np.outer(np.log(K),w))
+        A_train, A_val = np.exp(-np.outer(K_train,s)), np.exp(-np.outer(K_val,s))
+        
+        # Select nodes by pivoted QR, increasing their number until the fit converges at omega_fid
+        piv = qr(A_train, mode='economic', pivoting=True)[2]
+        n_osc = int(np.ceil(omega_fid/(2*np.pi)*np.log(K_max/K_min)))
+        for N in range(max(2,n_osc-2), min(len(s),20*n_osc+80)):
+            W = lstsq(A_train[:,piv[:N]], target(np.atleast_1d(omega_fid),K_train))[0]
+            if np.max(np.abs(A_val[:,piv[:N]]@W/target(np.atleast_1d(omega_fid),K_val)-1))<tol: break
+        
+        # Fit weights for each frequency
+        W = lstsq(A_train[:,piv[:N]], target(omega,K_train))[0]
+        print("fNL-feat-res: maximum fractional error %.1e"%np.max(np.abs(A_val[:,piv[:N]]@W/target(omega,K_val)-1)))
+        return s[piv[:N]], W.T
+    
+    @staticmethod
+    def _sharp_weights(n, lam, h, theta):
+        """Compute nodes s_j = e^{jh+i(pi/2-theta)} and weights W_gj for the three sharp shape functions."""
+        p = n+3
+        j = np.arange(np.floor((-60-np.log(lam))/h), np.ceil((10-np.log(lam))/h)+1)
+        u = lam*np.exp(j*h-1.0j*theta)
+        polys = [[0,0,1,1.0j*p,-(n*n+2*n+3),-1.0j*(2*n*n+n+1),n*n],
+                 [-2,-2.0j*p,3*(n*n+n+2),-1.0j*(n**3-6*n*n-n-2),n*n*(n-3),0,0],
+                 [0,-4*n*(n-1),2.0j*n*(n-1)*(3*n-1),n*n*(n-3)*(n-1),0,0,0]]
+        
+        # Compute derivatives of u^{p-1}e^{-u}/Gamma(p) using Laguerre recurrences, and drop negligible nodes
+        derivs = []
+        for m in range(7):
+            L0, L1 = np.ones_like(u), p-m-u
+            for i in range(1,m): L0, L1 = L1, ((2*i+p-m-u)*L1-(i+p-1-m)*L0)/(i+1)
+            derivs.append(np.exp(gammaln(m+1)+(p-1-m)*np.log(u)-u-gammaln(p))*(L1 if m>0 else L0))
+        W = h*u*np.asarray([np.sum([q[m]*(-1.0j)**m*derivs[m] for m in range(7) if q[m]!=0],axis=0) for q in polys])
+        keep = (np.abs(W)>1e-16*np.abs(W).max(axis=1)[:,None]).any(axis=0)
+        return j[keep].astype(int), W[:,keep]
         
     def report_timings(self):
         """Report timings for various steps of the computation."""
@@ -456,6 +539,15 @@ class BSpecTemplate():
             self.flXs_bin = np.zeros((self.lmax+1,1+2*self.pol,self.N_r,self.nbin1d),dtype=np.float64,order='C')
             p_integral_bin(self.k_arr, Pzeta_arr, np.asarray(self.k_bin_edges, dtype=np.float64, order='C'), self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, self.flXs_bin)
         
+        for t in self.feat:
+            
+            # Compute integrals in Cython
+            print("Computing f_l^X(r,s) integrals for %s"%t)
+            nodes = self.feat[t]['nodes']
+            self.feat[t]['flXs'] = {kpow: np.zeros((2,self.lmax+1,1+2*self.pol,self.N_r,len(nodes)),dtype=np.float64,order='C') for kpow in self.feat[t]['kpows']}
+            for kpow, flXs in self.feat[t]['flXs'].items():
+                q_integral_exp(self.k_arr, kpow, np.ascontiguousarray(nodes.real), np.ascontiguousarray(nodes.imag), self.Tl_arr, jlkr, self.lmin, self.lmax, self.base.nthreads, flXs[0], flXs[1])
+        
         if self.neural_inputs is not None:
             
             # Compute neural integrals in Cython
@@ -516,6 +608,12 @@ class BSpecTemplate():
         summ = np.zeros((1,len(self.lminfilt)),order='C',dtype=np.complex128)
         summ[0,self.lminfilt] = self.utils.apply_fl_weight_single(flX_arr, h_lm_filt, radial_index, 1.)
         return self.base.to_map(summ, lmax=self.lmax)
+
+    def _compute_feat_maps(self, h_lm_filt, t, radial_index, node_index):
+        """Compute complex [Sum_lm Y_lm(n) f_l^X(r,s) h_lm^X] maps for a feature template at a single radial point and node."""
+        flXs = np.concatenate([fl[:,:,:,radial_index,node_index].transpose(1,2,0) for fl in self.feat[t]['flXs'].values()],axis=2)
+        maps = self._compute_weighted_maps(h_lm_filt, np.ascontiguousarray(flXs))
+        return dict(zip(self.feat[t]['flXs'].keys(), maps[0::2]+1.0j*maps[1::2]))
 
     @_timer_func('map_transforms')
     def _compute_lensing_U_map(self, h_lm_filt):
@@ -722,6 +820,10 @@ class BSpecTemplate():
             
         if 'v-isw' in self.to_compute:
             output['v-isw'] = self._compute_isw_V_map(input_map)
+        
+        # Store harmonic-space map for feature templates
+        if len(self.feat)>0:
+            output['feat'] = input_map
             
         if self.neural_inputs is not None:
             for n in self.neural_inds:
@@ -882,6 +984,25 @@ class BSpecTemplate():
         else:
             raise Exception(f"Wrong spin s = {spin}!")
 
+    def _compute_feat_Q(self, Q, h_lm_filt, t):
+        """Add the Q-derivatives of a feature template to Q."""
+        feat = self.feat[t]
+        for j in range(len(feat['nodes'])):
+            Q_j = np.zeros((2,3,1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128)
+            for radial_index in range(self.N_r):
+                maps = self._compute_feat_maps(h_lm_filt, t, radial_index, j)
+                pair_lms = {}
+                for g, key in enumerate(feat['keys']):
+                    for i in range(3):
+                        pair = tuple(sorted(key[:i]+key[i+1:]))
+                        if pair not in pair_lms:
+                            prod = maps[pair[0]]*maps[pair[1]]
+                            pair_lms[pair] = np.asarray(self.base.to_lm_vec(np.asarray([prod.real,prod.imag]),lmax=self.lmax)[:,self.lminfilt],order='C')
+                        flX, lms = feat['flXs'][key[i]][:,:,:,radial_index,j][:,self.ls].transpose(0,2,1), pair_lms[pair]
+                        Q_j[:,g] += 2./3.*self.r_weights[t][radial_index]*np.asarray([flX[0]*lms[0]-flX[1]*lms[1], -flX[0]*lms[1]-flX[1]*lms[0]])
+            coeffs = np.concatenate([feat['coeffs'][:,:,j].real,feat['coeffs'][:,:,j].imag],axis=1)
+            Q += (coeffs@Q_j.reshape(6,-1)).reshape(Q.shape)
+    
     def _compute_fisher_derivatives(self, templates, verb=False, input_derivatives={}):
         """Compute the derivative of the ideal Fisher matrix with respect to the weights for each template of interest."""
 
@@ -950,6 +1071,27 @@ class BSpecTemplate():
         return output
     
     ### NUMERATOR
+    def _compute_feat_numerator(self, h_data_lm, t, include_linear_term=True):
+        """Compute the cubic and linear numerators of a feature template."""
+        feat = self.feat[t]
+        pairs = {tuple(sorted(key[:i]+key[i+1:])) for key in feat['keys'] for i in range(3)}
+        if include_linear_term:
+            h_sims = [(self.proc_maps[ii] if self.preload else self.load_sim_data(ii))['feat'] for ii in range(self.N_it)]
+        b3, b1 = np.zeros((2,3,len(feat['nodes'])),dtype=np.complex128)
+        for radial_index in range(self.N_r):
+            for j in range(len(feat['nodes'])):
+                maps = self._compute_feat_maps(h_data_lm, t, radial_index, j)
+                b3[:,j] += self.r_weights[t][radial_index]*np.asarray([np.sum(maps[key[0]]*maps[key[1]]*maps[key[2]]) for key in feat['keys']])
+                if not include_linear_term: continue
+                
+                # Average the products of simulation maps
+                sim_pairs = {pair: 0. for pair in pairs}
+                for h_sim in h_sims:
+                    sim_maps = self._compute_feat_maps(h_sim, t, radial_index, j)
+                    for pair in pairs: sim_pairs[pair] += sim_maps[pair[0]]*sim_maps[pair[1]]/self.N_it
+                b1[:,j] += self.r_weights[t][radial_index]*np.asarray([np.sum([np.sum(maps[key[i]]*sim_pairs[tuple(sorted(key[:i]+key[i+1:]))]) for i in range(3)]) for key in feat['keys']])
+        return 1./3.*np.real(np.einsum('agj,gj->a',feat['coeffs'],b3))*self.base.A_pix, -1./3.*np.real(np.einsum('agj,gj->a',feat['coeffs'],b1))*self.base.A_pix
+    
     @_timer_func('numerator')
     def Bl_numerator(self, data, include_linear_term=True, verb=False, input_type='map', return_cubic=False):
         """
@@ -1041,6 +1183,17 @@ class BSpecTemplate():
                 summ += 1./9.*p*self.utils.fnl_sum(self.r_weights[t], proc_maps['f_m2'], proc_maps['f_m2'], proc_maps['f_p4'])
                 b3_num[index] = 3./5.*summ*self.base.A_pix
                 index += 1
+                self.timers['fNL_summation'] += time.time()-t_init
+
+            elif t in self.feat:
+                # Feature templates (including the linear term)
+                print("Computing %s templates"%t)
+                
+                t_init = time.time()
+                b3, b1 = self._compute_feat_numerator(h_data_lm, t, include_linear_term)
+                b3_num[index:index+len(b3)] = b3
+                if include_linear_term: b1_num[index:index+len(b1)] = b1
+                index += len(b3)
                 self.timers['fNL_summation'] += time.time()-t_init
 
             elif 'neural' in t:
@@ -1167,6 +1320,9 @@ class BSpecTemplate():
                         b1_num[index] += -3./5.*summ*self.base.A_pix/self.N_it
                         index += 1
                         self.timers['fNL_summation'] += time.time()-t_init
+                        
+                    elif t in self.feat:
+                        index += len(self.feat[t]['coeffs'])
                         
                     elif 'neural' in t:
                         n = int(t.split('-')[1])
@@ -1630,6 +1786,13 @@ class BSpecTemplate():
                             Qs[index,q_index] += 1./9.*p*transform(mult(-2,-2,index),4)
                         q_index += 1
 
+                    elif t in self.feat:
+                        if radial_index==0:
+                            if verb: print("Computing Q-derivative for %s"%t)
+                            for index in [0,1]:
+                                self._compute_feat_Q(Qs[index,q_index:q_index+len(self.feat[t]['coeffs'])], Uinv_a_lms[index], t)
+                        q_index += len(self.feat[t]['coeffs'])
+
                     elif 'neural' in t:
                         n = int(t.split('-')[1])
                         if verb: print("Computing Q-derivative for neural-%d fNL"%n)
@@ -1824,7 +1987,8 @@ class BSpecTemplate():
         index = 0
         # Iterate over fields
         for t in self.templates:
-            Bl_dict[t] = Bl_out[index]
-            index += 1
+            n = len(self.feat[t]['coeffs']) if t in self.feat else 1
+            Bl_dict[t] = Bl_out[index:index+n] if t in self.feat else Bl_out[index]
+            index += n
             
         return Bl_dict

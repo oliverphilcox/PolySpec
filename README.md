@@ -18,6 +18,8 @@ In the templates classes, we include estimators for the following types of bispe
 - `fNL-eq`: Equilateral template, arising from inflaton self-interactions
 - `fNL-orth`: Orthogonal template, arising from inflaton self-interactions. We use the same convention as Planck.
 - `fNL-orth2`: Alternative orthogonal basis, arising from inflaton self-interactions. This uses the large-scale structure definition (which features the correct squeezed limit).
+- `fNL-feat-res`: Resonant feature templates, oscillating logarithmically in k_1+k_2+k_3 with frequency omega
+- `fNL-feat-sharp`: Sharp feature templates, parametrized by the index n and scale lam
 - `binned`: Binned primordial bispectrum in Fourier space
 - `isw-lensing`: Lensing-ISW cross-correlations (i.e. the lensing bispectrum)
 - `neural`: General factorizable basis functions, parametrized by neural networks. The usage for this feature is described in the [separable_bk](https://github.com/KunhaoZhong/separable_bk) repository.
