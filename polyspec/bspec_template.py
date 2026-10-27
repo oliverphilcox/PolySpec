@@ -3,7 +3,7 @@
 
 import numpy as np
 import time
-from scipy.special import gamma, p_roots, lpmn
+from scipy.special import gamma, p_roots, legendre_p_all
 from .cython.k_integrals import *
 from .cython.ideal_fisher import *
 from .cython.fNL_utils import *
@@ -892,7 +892,7 @@ class BSpecTemplate():
         # NB: using exact Gauss-Legendre integration in mu
         [mus, w_mus] = p_roots(2*self.lmax+1)
         ls = np.arange(self.lmin,self.lmax+1)
-        legs = np.asarray([lpmn(0,self.lmax,mus[i])[0][0,self.lmin:] for i in range(len(mus))])
+        legs = np.asarray([legendre_p_all(self.lmax,mus[i])[0][self.lmin:] for i in range(len(mus))])
             
         t_init = time.time()
         for template in templates:

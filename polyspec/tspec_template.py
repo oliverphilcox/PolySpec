@@ -3,7 +3,7 @@
 
 import numpy as np
 import time
-from scipy.special import gamma, p_roots, lpmn
+from scipy.special import gamma, p_roots, legendre_p_all
 from scipy.optimize import minimize
 from scipy.linalg import pinv
 import pywigxjpf as wig
@@ -2133,7 +2133,7 @@ class TSpecTemplate():
             # NB: using exact Gauss-Legendre integration in mu
             [mus, w_mus] = p_roots(2*self.lmax+1)
             ls = np.arange(self.lmin,self.lmax+1)
-            legs = np.asarray([lpmn(0,self.lmax,mus[i])[0][0,self.lmin:] for i in range(len(mus))])
+            legs = np.asarray([legendre_p_all(self.lmax,mus[i])[0][self.lmin:] for i in range(len(mus))])
                 
             t_init = time.time()
             for template in contact_templates:
