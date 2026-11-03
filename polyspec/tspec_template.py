@@ -2110,8 +2110,10 @@ class TSpecTemplate():
         else:
             raise Exception(f"Wrong spin s = {spin}!")
     
-    def _compute_fisher_derivatives(self, templates, N_fish_optim=None, verb=False):
-        """Compute the derivative of the ideal Fisher matrix with respect to the weights for each template of interest."""
+    def _compute_fisher_derivatives(self, templates, N_fish_optim=None, verb=False, weights=None):
+        """Compute the derivative of the ideal Fisher matrix with respect to the weights for each template of interest.
+
+        By default, the radial points carry the quadrature weights; a dictionary of per-template weights can be supplied instead (contact templates only)."""
 
         # Output array
         output = {}
@@ -2137,34 +2139,42 @@ class TSpecTemplate():
                 
             t_init = time.time()
             for template in contact_templates:
-                    
+
+                # Define the weights of the radial points
+                if weights is not None:
+                    w = weights[template]
+                elif template in self.all_templates_2d:
+                    w = self.quad_weights_2d
+                else:
+                    w = self.quad_weights_1d
+
                 if template=='gNL-loc':
                     if verb: print("\tComputing gNL-loc Fisher matrix derivative exactly")
-                    deriv_matrix = np.asarray(fisher_deriv_gNL_loc(self.plLXs[self.nmax], self.qlXs, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                    deriv_matrix = np.asarray(fisher_deriv_gNL_loc(self.plLXs[self.nmax], self.qlXs, w, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                         legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
-                    
+
                 elif template=='gNL-con':
 
                     if verb: print("\tComputing gNL-con Fisher matrix derivative exactly")
-                    deriv_matrix = np.asarray(fisher_deriv_gNL_con(self.rlXs, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
+                    deriv_matrix = np.asarray(fisher_deriv_gNL_con(self.rlXs, w, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                         legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
-                
+
                 elif template=='gNL-dotdot':
 
                     if verb: print("\tComputing gNL-dotdot Fisher matrix derivative exactly")
-                    deriv_matrix = np.asarray(fisher_deriv_gNL_dotdot(self.alXs, self.rtau_arr[:,1], self.quad_weights_2d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                    deriv_matrix = np.asarray(fisher_deriv_gNL_dotdot(self.alXs, self.rtau_arr[:,1], w, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                             legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
-                
+
                 elif template=='gNL-dotdel':
-                    
+
                     if verb: print("\tComputing gNL-dotdel Fisher matrix derivative exactly")
-                    deriv_matrix = np.asarray(fisher_deriv_gNL_dotdel(self.alXs, self.blXs, self.clXs, self.rtau_arr[:,1], self.quad_weights_2d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                    deriv_matrix = np.asarray(fisher_deriv_gNL_dotdel(self.alXs, self.blXs, self.clXs, self.rtau_arr[:,1], w, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                             legs, mus, w_mus, self.lmin, self.lmax, self.base.nthreads))
-                    
+
                 elif template=='gNL-deldel':
-                    
+
                     if verb: print("\tComputing gNL-deldel Fisher matrix derivative exactly")
-                    deriv_matrix = np.asarray(fisher_deriv_gNL_deldel(self.blXs, self.clXs, self.quad_weights_2d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                    deriv_matrix = np.asarray(fisher_deriv_gNL_deldel(self.blXs, self.clXs, w, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                             legs, mus, w_mus, self.lmin, self.lmax, self.base.nthreads))
                    
                 else:
@@ -2176,7 +2186,8 @@ class TSpecTemplate():
 
         # Move to tauNL estimators
         if len(exchange_templates)!=0:
-            
+            assert weights is None, "Custom weights are not implemented for exchange templates!"
+
             # Precompute common terms
             all_Uinv_lms = []
             Q_maps = []
@@ -3232,7 +3243,7 @@ class TSpecTemplate():
     
     ### OPTIMIZATION
     @_timer_func('optimization')
-    def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_fish_optim=1, stalled_iterations=np.inf, N_split=None, split_index=None, initial_r_points=None, verb=False, optimize_weights = False, optimize_skip=0, repeat_trials=True, r_guess = [], weight_guess = {}):
+    def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_fish_optim=1, stalled_iterations=np.inf, N_split=None, split_index=None, initial_r_points=None, initial_r_weights=None, verb=False, optimize_weights = False, optimize_skip=0, repeat_trials=True, r_guess = [], weight_guess = {}):
         """
         Compute the 1D radial sampling points and weights via optimization (as in Smith & Zaldarriaga 06), up to some tolerance in the Fisher distance.
         Optimization will be done for each template, starting with exchange forms. For contact shapes we will analytically compute the 'distance' between template approximations, whilst for exchange trispectra this will be computed using N_fish_optim Monte Carlo iterations.
@@ -3250,7 +3261,10 @@ class TSpecTemplate():
             - N_split (optional): Number of chunks to split the optimization into. If None, no splitting is performed.
             - split_index (optional): Index of the chunk to optimize. 
             - initial_r_points (optional): Starting set of radial points (used for the final optimization step).
-        
+            - initial_r_weights (optional): Dictionary of optimized weights for each template at the starting points (used for the final optimization step; contact templates only).
+
+        In the final step, the weighted sum of the chunk-optimized templates approximates the full integral, so each template is re-optimized over its own non-zero-weight points using these weights.
+
         The other input parameters are deprecated and may be removed in future releases.
         """
         assert self.ints_1d, "No 1D optimization is required for these templates!"
@@ -3269,12 +3283,13 @@ class TSpecTemplate():
         r_raw = np.asarray(list(np.arange(1,self.r_star*0.95,50*reduce_r))+list(np.arange(self.r_star*0.95,self.r_hor*1.05,5*reduce_r))+list(np.arange(self.r_hor*1.05,self.r_hor+5000,50*reduce_r)))
         r_init = 0.5*(r_raw[1:]+r_raw[:-1])
         self.quad_weights_1d = r_init**2*np.diff(r_raw)
-        r_weights = {}
-        
+        selection = {}
+
         # Partition the radial indices if required or read in precomputed points
         if initial_r_points is not None:
             assert split_index is None, "Cannot specify both initial_r_points and index_split"
             assert len(initial_r_points)==len(np.unique(initial_r_points)), "initial_r_points cannot contain repeated points"
+            assert initial_r_weights is not None, "Must supply the optimized weights of the initial radial points!"
             inds = np.asarray([np.where(r==r_init)[0][0] for r in initial_r_points])
             r_init = r_init[inds]
             self.quad_weights_1d = self.quad_weights_1d[inds]
@@ -3313,7 +3328,7 @@ class TSpecTemplate():
         
         # Compute all Fisher matrix derivatives of interest
         if verb: print("Computing all Fisher matrix derivatives")
-        derivs = self._compute_fisher_derivatives(ordered_templates, N_fish_optim=N_fish_optim, verb=verb)
+        derivs = self._compute_fisher_derivatives(ordered_templates, N_fish_optim=N_fish_optim, verb=verb, weights=initial_r_weights)
         
         # Save ideal Fisher matrices
         if not hasattr(self, 'ideal_fisher'):
@@ -3334,7 +3349,18 @@ class TSpecTemplate():
             # Compute Fisher matrix derivative
             init_score, deriv_matrix = derivs[template][0], derivs[template][1]
             if verb: print("Initial score: %.2e"%init_score)
-            
+
+            # Define the weights and points available to this template (all points, unless starting from optimized weights)
+            if initial_r_weights is None:
+                point_weights = self.quad_weights_1d
+                alive = np.arange(self.N_r)
+            else:
+                point_weights = initial_r_weights[template]
+                alive = np.where(point_weights!=0)[0]
+                deriv_matrix = deriv_matrix[alive][:,alive]
+                inds = []
+            inds_init = np.arange(len(alive))
+
             # Load pre-computed functions, if necessary
             if 'tauNL' in template:
                 all_Uinv_lms, all_Q4 = derivs[template][2], derivs[template][3]
@@ -3662,7 +3688,7 @@ class TSpecTemplate():
             # Check zeroth iteration
             if len(inds)!=0:
                 # Compute quadratic weights
-                notinds = [i for i in np.arange(self.N_r) if i not in inds]
+                notinds = [i for i in inds_init if i not in inds]
                 inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
                 G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
                 w_quad = (1+np.sum(inv_deriv@deriv_matrix[inds][:,notinds],axis=1))
@@ -3709,7 +3735,7 @@ class TSpecTemplate():
                 score_old = score
                     
                 # Iterate until convergence
-                for iit,iteration in enumerate(range(len(inds),self.N_r)):
+                for iit,iteration in enumerate(range(len(inds),len(alive))):
                     
                     # Trial a new index
                     for trial in range(len(next_inds)):
@@ -3717,7 +3743,7 @@ class TSpecTemplate():
                         # Define indices  
                         next_ind = next_inds[trial]
                         inds[-1] = next_ind
-                        notinds = [i for i in np.arange(self.N_r) if i not in inds]
+                        notinds = [i for i in inds_init if i not in inds]
                         
                         # Set-up weights
                         inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
@@ -3776,18 +3802,21 @@ class TSpecTemplate():
             score, fish = _compute_score(w_opt, 1, gradient=False, full_score=True, update=False)
             if verb: print("Ideal %s Fisher: %.4e (initial), %.4e (optimized). Relative score: %.2e\n"%(template, init_score, fish, score/init_score))
 
-            # Store attributes
-            r_weights[template] = w_opt*self.quad_weights_1d[inds]
-        
-        # Store attributes
+            # Store selected points and weights
+            selection[template] = alive[inds], w_opt*point_weights[alive[inds]]
+
+        # Store attributes, taking the union of the points selected for each template
+        inds = []
+        for template in ordered_templates:
+            inds += [i for i in selection[template][0] if i not in inds]
         self.r_arr = r_init[inds]
         self.N_r = len(self.r_arr)
         self.r_weights = {}
         for template in ordered_templates:
             # add weights, padding with zeros
-            self.r_weights[template] = np.zeros(len(w_opt)) 
-            self.r_weights[template][:len(r_weights[template])] = r_weights[template]
-        
+            self.r_weights[template] = np.zeros(self.N_r)
+            self.r_weights[template][[inds.index(i) for i in selection[template][0]]] = selection[template][1]
+
         # Precompute k-space integrals with new radial integration
         if verb: print("Computing k integrals with optimized radial grid")
         self._prepare_templates(ints_1d=True,ints_2d=False,ints_coll=self.ints_coll)
@@ -3797,7 +3826,7 @@ class TSpecTemplate():
         return self.r_arr, self.r_weights
     
     @_timer_func('optimization')
-    def optimize_radial_sampling_2d(self, reduce_r=1, reduce_tau=1, tolerance=1e-3, verb=False, N_split=None, split_index=None, initial_rtau_points=None):
+    def optimize_radial_sampling_2d(self, reduce_r=1, reduce_tau=1, tolerance=1e-3, verb=False, N_split=None, split_index=None, initial_rtau_points=None, initial_rtau_weights=None):
         """
         Compute the 2D radial sampling points and weights via optimization (as in Smith & Zaldarriaga 06), up to some tolerance in the Fisher distance.
         Optimization will be done for each template, analytically compute the 'distance' between template approximations. Note that this is required only for the EFTI templates (which involve 2D integrals over r and tau).
@@ -3814,6 +3843,9 @@ class TSpecTemplate():
             - N_split (optional): Number of chunks to split the optimization into. If None, no splitting is performed.
             - split_index (optional): Index of the chunk to optimize. 
             - initial_rtau_points (optional): Starting set of r/tau points (used for the final optimization step).
+            - initial_rtau_weights (optional): Dictionary of optimized weights for each template at the starting points (used for the final optimization step).
+
+        In the final step, the weighted sum of the chunk-optimized templates approximates the full integral, so each template is re-optimized over its own non-zero-weight points using these weights.
         """
 
         assert self.ints_2d, "Only 1D sampling is required for these templates!"
@@ -3850,6 +3882,7 @@ class TSpecTemplate():
         # Partition the radial/tau indices if required or read in precomputed points
         if initial_rtau_points is not None:
             assert split_index is None, "Cannot specify both initial_rtau_points and index_split"
+            assert initial_rtau_weights is not None, "Must supply the optimized weights of the initial r/tau points!"
             inds = np.asarray([np.argmin(np.sum((rtau-rtau_init)**2,1)) for rtau in initial_rtau_points])
             rtau_init = rtau_init[inds]
             self.quad_weights_2d = self.quad_weights_2d[inds]
@@ -3859,8 +3892,8 @@ class TSpecTemplate():
                 rtau_init = rtau_init[split_index::N_split]
                 self.quad_weights_2d = self.quad_weights_2d[split_index::N_split]
 
-        rtau_weights = {}
-        
+        selection = {}
+
         # Precompute k-integrals with initial r grid
         self.rtau_arr = rtau_init
         self.N_rtau = len(rtau_init)
@@ -3875,12 +3908,11 @@ class TSpecTemplate():
             
         # Create list of r/tau indices in the optimized representation
         inds = []
-        inds_init = np.arange(self.N_rtau)
-            
+
         # Compute Fisher matrix derivative
         if verb: print("Computing all Fisher matrix derivatives")
-        derivs = self._compute_fisher_derivatives(ordered_templates, verb=verb)
-        
+        derivs = self._compute_fisher_derivatives(ordered_templates, verb=verb, weights=initial_rtau_weights)
+
         # Save ideal Fisher matrices
         if not hasattr(self, 'ideal_fisher'):
             self.ideal_fisher = {}
@@ -3888,11 +3920,22 @@ class TSpecTemplate():
             self.ideal_fisher[t] = derivs[t][0]
 
         for template in ordered_templates:
-            
+
             # Load initial score and normalize to avoid conditioning problems
             init_score, deriv_matrix = derivs[template][0], derivs[template][1]
             deriv_matrix /= init_score
-            
+
+            # Define the weights and points available to this template (all points, unless starting from optimized weights)
+            if initial_rtau_weights is None:
+                point_weights = self.quad_weights_2d
+                alive = np.arange(self.N_rtau)
+            else:
+                point_weights = initial_rtau_weights[template]
+                alive = np.where(point_weights!=0)[0]
+                deriv_matrix = deriv_matrix[alive][:,alive]
+                inds = []
+            inds_init = np.arange(len(alive))
+
             # Initialize optimization (from scratch, if this is the first template)
             print("Init score: %.2e"%init_score)
             if len(inds)==0:
@@ -3900,9 +3943,9 @@ class TSpecTemplate():
                 inds = [next_ind]
 
             # Iterate over radial points using a greedy algorithm
-            for iteration in range(len(inds)-1,self.N_rtau):
+            for iteration in range(len(inds)-1,len(alive)):
 
-                notinds = [i for i in np.arange(self.N_rtau) if i not in inds]
+                notinds = [i for i in inds_init if i not in inds]
                 inv_deriv = pinv(deriv_matrix[inds][:,inds],rtol=1e-20)
                 G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
 
@@ -3947,17 +3990,20 @@ class TSpecTemplate():
             score, fish = _compute_score(w_opt, init_score, full_score=True)
             print("Ideal Fisher: %.4e (initial), %.4e (optimized). Fractional score: %.2e\n"%(init_score, fish, score/fish))
 
-            # Store attributes
-            rtau_weights[template] = w_opt*self.quad_weights_2d[inds]
-            
-        # Store attributes
+            # Store selected points and weights
+            selection[template] = alive[inds], w_opt*point_weights[alive[inds]]
+
+        # Store attributes, taking the union of the points selected for each template
+        inds = []
+        for template in ordered_templates:
+            inds += [i for i in selection[template][0] if i not in inds]
         self.rtau_arr = rtau_init[inds]
         self.N_rtau = len(self.rtau_arr)
         self.rtau_weights = {}
         for template in ordered_templates:
             # add weights, padding with zeros
-            self.rtau_weights[template] = np.zeros(len(w_opt)) 
-            self.rtau_weights[template][:len(rtau_weights[template])] = rtau_weights[template]
+            self.rtau_weights[template] = np.zeros(self.N_rtau)
+            self.rtau_weights[template][[inds.index(i) for i in selection[template][0]]] = selection[template][1]
 
         # Precompute k-space integrals with new radial integration
         print("Computing k integrals with optimized radial grid")
