@@ -5,6 +5,7 @@ import numpy as np
 cimport numpy as np
 cimport cython
 from libc.math cimport abs, M_PI, M_E, sqrt, exp, pow as dpow, sin
+from scipy.special.cython_special cimport jv
 from cython.parallel import prange
 
 cdef extern from "gsl/gsl_errno.h" nogil:
@@ -159,6 +160,51 @@ cpdef void a_integral(double[:] k_arr, double[:] tau_arr, double[:] Pzeta_arr, d
             # Iterate over tau
             for itau in xrange(ntau):
                 
+                # Compute trapezium rule
+                f_low = ktauprod[itau,0]*Tl_arr[1,lmin+il,0]*jlkrtau[il,itau,0]
+                for ik in xrange(1,nk):
+                    f_high = ktauprod[itau,ik]*Tl_arr[1,lmin+il,ik]*jlkrtau[il,itau,ik]
+                    integs[lmin+il,1,itau] += lpref*(k_arr[ik]-k_arr[ik-1])*(f_low+f_high)
+                    f_low = f_high
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cpdef void d_integral(double[:] k_arr, double[:] tau_arr, double nu, double Ieq, double[:] Pzeta_arr, double[:,:,::1] Tl_arr, double[:,:,::1] jlkrtau,
+                     int lmin, int lmax, int nthreads, np.ndarray[np.float64_t,ndim=3] _integs):
+    """Compute the d_l^X(r, tau) integral with the trapezium rule, for the dissipative template with Bessel index nu (normalized by Ieq = Int dx x^(8-4nu) J_nu(x)^4)."""
+
+    cdef int il, ik, itau, nk = len(k_arr), ntau = len(tau_arr), nl = lmax+1-lmin, npol = len(Tl_arr)
+    cdef double[:,::1] ktauprod = np.zeros((ntau,nk),dtype=np.float64)
+    cdef double lpref, kpref, f_low, f_high, ksum
+    cdef double[:,:,::1] integs = _integs
+
+    # Compute k,tau-dependent piece
+    for ik in prange(nk,nogil=True,schedule='static',num_threads=nthreads):
+        kpref = 2./M_PI*dpow(k_arr[ik],17./4.-nu)*dpow(Pzeta_arr[ik],3./4.)/2./dpow(Ieq,0.25)
+        for itau in xrange(ntau):
+            ktauprod[itau,ik] += kpref*dpow(-tau_arr[itau],2.-nu)*jv(nu,-k_arr[ik]*tau_arr[itau])
+
+    # Perform sum for each polarization
+    for il in prange(nl, nogil=True,schedule='static',num_threads=nthreads):
+        lpref = dpow(-1.,lmin+il)
+
+        # Iterate over tau
+        for itau in xrange(ntau):
+
+            # Compute trapezium rule
+            f_low = ktauprod[itau,0]*Tl_arr[0,lmin+il,0]*jlkrtau[il,itau,0]
+            for ik in xrange(1,nk):
+                f_high = ktauprod[itau,ik]*Tl_arr[0,lmin+il,ik]*jlkrtau[il,itau,ik]
+                integs[lmin+il,0,itau] += lpref*(k_arr[ik]-k_arr[ik-1])*(f_low+f_high)
+                f_low = f_high
+    if npol>1:
+        for il in prange(nl,nogil=True,schedule='static',num_threads=nthreads):
+            lpref = dpow(-1.,lmin+il)
+
+            # Iterate over tau
+            for itau in xrange(ntau):
+
                 # Compute trapezium rule
                 f_low = ktauprod[itau,0]*Tl_arr[1,lmin+il,0]*jlkrtau[il,itau,0]
                 for ik in xrange(1,nk):

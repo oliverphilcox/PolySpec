@@ -26,6 +26,7 @@ We additionally provide estimators for the following trispectrum templates:
 - `gNL-loc`, `tauNL-loc`: Cubic local templates
 - `gNL-con`: Featureless constant template
 - `gNL-dotdot`, `gNL-dotdel`, `gNL-deldel`: Effective Field Theory of Inflation templates
+- `gNL-pia4:nu`: Dissipative (open EFT) noise template with Bessel index nu = 3/2 + gamma/(2H)
 - `tauNL-direc`, `tauNL-even`, `tauNL-odd`: Direction-dependent tauNL templates
 - `tauNL-heavy`, `tauNL-light`: Cosmological collider signatures from massive spinning particles
 - `lensing`, `isw-lensing`, `point-source`: CMB lensing, lensing-ISW cross-correlations, and point source amplitudes.
