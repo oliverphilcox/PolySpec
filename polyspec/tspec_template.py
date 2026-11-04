@@ -4200,15 +4200,15 @@ class TSpecTemplate():
                     quad_22 = self.utils.multiply2(B_maps[1],B_maps[1],C_maps[1],C_maps[1])
                     
                     # 111
-                    Qs[0,ii]  = 248772./2575.*self._transform_maps(self.utils.multiply2R(B_maps[0],quad_11),
+                    Qs[0,ii]  = 248832./2575.*self._transform_maps(self.utils.multiply2R(B_maps[0],quad_11),
                                                                    self.blXs,self.rtau_weights[t])
-                    Qs[0,ii] += 248772./2575.*self._transform_maps(self.utils.multiply2C(C_maps[0],quad_11),
+                    Qs[0,ii] += 248832./2575.*self._transform_maps(self.utils.multiply2C(C_maps[0],quad_11),
                                                                    self.clXs,self.rtau_weights[t],spin=1)
                     
                     # 222
-                    Qs[1,ii]  = 248772./2575.*self._transform_maps(self.utils.multiply2R(B_maps[1],quad_22),
+                    Qs[1,ii]  = 248832./2575.*self._transform_maps(self.utils.multiply2R(B_maps[1],quad_22),
                                                                    self.blXs,self.rtau_weights[t])
-                    Qs[1,ii] += 248772./2575.*self._transform_maps(self.utils.multiply2C(C_maps[1],quad_22),
+                    Qs[1,ii] += 248832./2575.*self._transform_maps(self.utils.multiply2C(C_maps[1],quad_22),
                                                                    self.clXs,self.rtau_weights[t],spin=1)
                     
                     # 112 
