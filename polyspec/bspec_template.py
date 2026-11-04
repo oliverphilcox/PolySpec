@@ -4,6 +4,7 @@
 import numpy as np
 import time
 from scipy.special import gamma, p_roots, legendre_p_all
+from .base import greedy_schur
 from .cython.k_integrals import *
 from .cython.ideal_fisher import *
 from .cython.fNL_utils import *
@@ -1291,8 +1292,7 @@ class BSpecTemplate():
         
         # Create list of radial indices in the optimized representation
         inds = []
-        inds_init = np.arange(self.N_r)
-        
+
         # Compute all Fisher matrix derivatives of interest
         if verb: print("Computing all Fisher matrix derivatives")
         derivs = self._compute_fisher_derivatives(ordered_templates, verb=verb, input_derivatives=input_derivatives, weights=initial_r_weights)
@@ -1326,7 +1326,6 @@ class BSpecTemplate():
                 alive = np.where(point_weights!=0)[0]
                 deriv_matrix = deriv_matrix[alive][:,alive]
                 inds = []
-            inds_init = np.arange(len(alive))
 
             def _compute_score(w_vals, full_score=False):
                 """
@@ -1343,29 +1342,20 @@ class BSpecTemplate():
                 return score, w_vals
             
             # Check zeroth iteration
+            min_diag = 1e-10*np.max(np.diag(deriv_matrix))
+            G_mat, w_vals, next_inds = greedy_schur(deriv_matrix, inds, min_diag)
             if len(inds)!=0:
-                # Compute quadratic weights
-                notinds = [i for i in inds_init if i not in inds]
-                inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
-                G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
-                w_vals = (1+np.sum(inv_deriv@deriv_matrix[inds][:,notinds],axis=1))
-                
                 # Compute score
                 score, w_vals = _test_inds(inds, init_score, w_vals)
                 if verb: print("Unoptimized relative score: %.2e"%(score/init_score))
             else:
                 score = init_score
-                w_vals = []
-                G_mat = np.eye(0) # dummy variable
-                
+
             # Set up iteration
-            if score/init_score >= tolerance and (np.diag(G_mat)>0).all():
+            if score/init_score >= tolerance and len(next_inds)>0:
 
                 # Define starting indices
-                if len(inds)==0:
-                    next_ind = np.argsort(np.sum(deriv_matrix,axis=1)**2/np.diag(deriv_matrix))[-1]
-                else:
-                    next_ind = inds_init[notinds][np.argsort(np.sum(G_mat,axis=1)**2/np.diag(G_mat))[-1]]
+                next_ind = next_inds[0]
                 inds.append(next_ind)
                 
                 # Set-up memory
@@ -1375,31 +1365,16 @@ class BSpecTemplate():
                 # Iterate until convergence
                 for iit,iteration in enumerate(range(len(inds),len(alive))):
                     
-                    # Define indices  
+                    # Define indices
                     inds[-1] = next_ind
-                    notinds = [i for i in inds_init if i not in inds]
-                    
+
                     # Set-up weights
-                    try:
-                        inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
-                    except:
-                        print("Singular matrix; exiting!")
-                        inds = inds[:-1]
-                        break
-                    G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
-                    
-                    # Compute optimal quadratic weights
-                    w_vals = (1+np.sum(inv_deriv@deriv_matrix[inds][:,notinds],axis=1))
+                    G_mat, w_vals, next_inds = greedy_schur(deriv_matrix, inds, min_diag)
                       
                     # Compute score
                     score, w_vals = _test_inds(inds, score_old, w_vals)
                     if verb: print("Iteration %d, relative score: %.2e, old score: %.2e"%(iteration, score/init_score, score_old/init_score))
-                    
-                    # Check for numerical errors
-                    if score<0:
-                        print("## Score is negative; this indicates a numerical error!")
-                        break
-                    
+
                     # Finish if converged
                     if score/init_score < tolerance:
                         break
@@ -1411,12 +1386,11 @@ class BSpecTemplate():
                     score_old = score
                     
                     # Compute indices for next iteration
-                    next_ind = inds_init[notinds][np.argsort(np.sum(G_mat,axis=1)**2/np.diag(G_mat))[-1]]
+                    if len(next_inds)==0:
+                        break
+                    next_ind = next_inds[0]
                     inds.append(next_ind)
-                    
-            if len(G_mat)==0:
-                raise Exception("Failed to converge; this indicates a bug!")
-                
+
             if verb: print("\nScore threshold met with %d indices"%len(inds))
             w_opt = np.asarray(w_vals.copy())
             

@@ -6,6 +6,32 @@ import multiprocessing as mp
 import healpy
 from scipy.interpolate import InterpolatedUnivariateSpline
 
+def greedy_schur(deriv_matrix, inds, min_diag):
+    """Compute the Schur complement of the radial points not in inds (zero elsewhere), the optimal weights of the points in inds, and the remaining points ordered by their reduction of the Fisher distance. Points whose Schur diagonal is below min_diag are numerically redundant and are skipped."""
+
+    # Add each point in turn, updating the Schur complement
+    G_mat = deriv_matrix.copy()
+    used_inds = []
+    for ind in inds:
+        if G_mat[ind,ind]>min_diag:
+            g_vec = G_mat[:,ind].copy()
+            G_mat -= np.outer(g_vec,g_vec)/g_vec[ind]
+            G_mat[ind] = 0.
+            G_mat[:,ind] = 0.
+            used_inds.append(ind)
+
+    # Compute optimal weights
+    w_vals = np.zeros(len(inds))
+    if len(used_inds)>0:
+        w_vals[[list(inds).index(ind) for ind in used_inds]] = np.linalg.solve(deriv_matrix[used_inds][:,used_inds], np.sum(deriv_matrix[used_inds],axis=1))
+
+    # Order the remaining points
+    diag_G = np.diag(G_mat)
+    reduction = np.where(diag_G>min_diag, np.sum(G_mat,axis=1)**2/np.where(diag_G>min_diag,diag_G,1.), -1.)
+    next_inds = np.argsort(reduction)[::-1]
+    next_inds = next_inds[reduction[next_inds]>=0]
+    return G_mat, w_vals, next_inds
+
 class PolySpec():
     """Base class for PolySpec.
     

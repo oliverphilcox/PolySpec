@@ -5,8 +5,8 @@ import numpy as np
 import time
 from scipy.special import gamma, p_roots, legendre_p_all
 from scipy.optimize import minimize
-from scipy.linalg import pinv
 import pywigxjpf as wig
+from .base import greedy_schur
 from .cython.k_integrals import *
 from .cython.tauNL_utils import *
 from .cython.ideal_fisher import *
@@ -3316,9 +3316,7 @@ class TSpecTemplate():
             if len(index)==0:
                 raise Exception("r_guess was computed with different settings! All points in r_guess must be in r_init.")
             inds.append(index[0])
-        
-        inds_init = np.arange(self.N_r)
-        
+
         if len(weight_guess.keys())>0:
             assert len(inds)>0, "Must supply r_guess!"
             if verb: print("Starting from a set of %d radial points"%(len(inds)))
@@ -3359,7 +3357,6 @@ class TSpecTemplate():
                 alive = np.where(point_weights!=0)[0]
                 deriv_matrix = deriv_matrix[alive][:,alive]
                 inds = []
-            inds_init = np.arange(len(alive))
 
             # Load pre-computed functions, if necessary
             if 'tauNL' in template:
@@ -3686,19 +3683,14 @@ class TSpecTemplate():
                 return score, w_vals
             
             # Check zeroth iteration
+            min_diag = 1e-10*np.max(np.diag(deriv_matrix))
+            G_mat, w_quad, next_inds = greedy_schur(deriv_matrix, inds, min_diag)
             if len(inds)!=0:
-                # Compute quadratic weights
-                notinds = [i for i in inds_init if i not in inds]
-                inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
-                G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
-                w_quad = (1+np.sum(inv_deriv@deriv_matrix[inds][:,notinds],axis=1))
-                
+
                 # Add previously optimized weights, if present
                 if template in weight_guess.keys():
                     n_guess = np.sum(weight_guess[template]!=0)
-                    notinds_guess = [i for i in np.arange(self.N_r) if i not in inds_guess[:n_guess]]
-                    inv_deriv_guess = np.linalg.inv(deriv_matrix[inds_guess[:n_guess]][:,inds_guess[:n_guess]])
-                    w_quad_guess = (1+np.sum(inv_deriv_guess@deriv_matrix[inds_guess[:n_guess]][:,notinds_guess],axis=1))
+                    w_quad_guess = greedy_schur(deriv_matrix, inds_guess[:n_guess], min_diag)[1]
                     w_vals = w_quad + np.concatenate([weight_guess[template][:n_guess]/self.quad_weights_1d[inds_guess[:n_guess]]-w_quad_guess,np.zeros(len(inds)-n_guess)])
                 else: 
                     w_vals = w_quad
@@ -3720,12 +3712,8 @@ class TSpecTemplate():
             
             # Set up iteration
             if score/init_score >= tolerance:
-                
+
                 # Define starting indices
-                if len(inds)==0:
-                    next_inds = np.argsort(np.sum(deriv_matrix,axis=1)**2/np.diag(deriv_matrix))[::-1]
-                else:
-                    next_inds = inds_init[notinds][np.argsort(np.sum(G_mat,axis=1)**2/np.diag(G_mat))[::-1]]
                 next_ind = next_inds[0]
                 inds.append(next_ind)
                 
@@ -3740,17 +3728,14 @@ class TSpecTemplate():
                     # Trial a new index
                     for trial in range(len(next_inds)):
                         
-                        # Define indices  
+                        # Define indices
                         next_ind = next_inds[trial]
                         inds[-1] = next_ind
-                        notinds = [i for i in inds_init if i not in inds]
-                        
+
                         # Set-up weights
-                        inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
-                        G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
-                        
-                        # Compute optimal quadratic weights and add to current values            
-                        w_quad = (1+np.sum(inv_deriv@deriv_matrix[inds][:,notinds],axis=1))
+                        G_mat, w_quad, new_inds = greedy_schur(deriv_matrix, inds, min_diag)
+
+                        # Add optimal quadratic weights to current values
                         w_vals = np.append(w_vals_old, 0.)+w_quad-np.append(w_quad_old,0.)
                            
                         # Update tauNL arrays
@@ -3789,12 +3774,11 @@ class TSpecTemplate():
                     score_old = score
                     
                     # Compute indices for next iteration
-                    next_inds = inds_init[notinds][np.argsort(np.sum(G_mat,axis=1)**2/np.diag(G_mat))[::-1]]
+                    next_inds = new_inds
+                    if len(next_inds)==0:
+                        break
                     inds.append(next_inds[0])
-                    
-            if len(G_mat)==0:
-                raise Exception("Failed to converge after %d iterations; this indicates a bug!"%N_fish_optim)
-                
+
             if verb: print("\nScore threshold met with %d indices"%len(inds))
             w_opt = np.asarray(w_vals.copy())
             
@@ -3934,61 +3918,31 @@ class TSpecTemplate():
                 alive = np.where(point_weights!=0)[0]
                 deriv_matrix = deriv_matrix[alive][:,alive]
                 inds = []
-            inds_init = np.arange(len(alive))
 
-            # Initialize optimization (from scratch, if this is the first template)
+            # Initialize optimization
             print("Init score: %.2e"%init_score)
-            if len(inds)==0:
-                next_ind = np.argmax(np.sum(deriv_matrix,axis=1)**2/np.diag(deriv_matrix))
-                inds = [next_ind]
+            min_diag = 1e-10*np.max(np.diag(deriv_matrix))
 
             # Iterate over radial points using a greedy algorithm
-            for iteration in range(len(inds)-1,len(alive)):
+            for iteration in range(len(inds),len(alive)+1):
 
-                notinds = [i for i in inds_init if i not in inds]
-                inv_deriv = pinv(deriv_matrix[inds][:,inds],rtol=1e-20)
-                G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
+                # Compute Schur complement and optimal weights with current points
+                G_mat, w_opt, next_inds = greedy_schur(deriv_matrix, inds, min_diag)
+                score = np.sum(G_mat)
+                if verb: print("Iteration %d, score: %.2e"%(iteration, score*init_score))
 
-                def _compute_score(w_vals, scaling=1, full_score=False):
-                    """Compute the Fisher distance between templates given weights w_vals. This optionally computes the gradients."""
-                    
-                    if full_score:
-                        return scaling*np.sum(G_mat), scaling*np.sum(np.outer(w_vals,w_vals)*deriv_matrix[inds][:,inds])
-                    else:
-                        return scaling*np.sum(G_mat)
-
-                # Compute quadratic weights
-                w_vals = (1+np.sum(inv_deriv@deriv_matrix[inds][:,notinds],axis=1))
-
-                # Compute score with fiducial weights
-                score = _compute_score(w_vals, init_score)
-                if verb: print("Iteration %d, score: %.2e"%(iteration, score))
-
-                # Check for numerical errors
-                if score<0:
-                    print("## Score is negative; this indicates a numerical error!")
-                    
-                    # Define optimal weights and exit
-                    w_opt = w_vals.copy()
-                    break
-                
-                if score/init_score<tolerance:
+                if score<tolerance:
                     print("Terminating at step %d"%iteration)
-
-                    # Compute optimal weights
-                    w_opt = w_vals.copy()
+                    break
+                if len(next_inds)==0:
                     break
 
                 # Update indices
-                next_ind = inds_init[notinds][np.argmax(np.sum(G_mat,axis=1)**2/np.diag(G_mat))]
-                inds.append(next_ind)
-            else:
-                # Loop completed without break - optimization exhausted all points
-                w_opt = w_vals.copy()
+                inds.append(next_inds[0])
 
             # Check final Fisher matrix
-            score, fish = _compute_score(w_opt, init_score, full_score=True)
-            print("Ideal Fisher: %.4e (initial), %.4e (optimized). Fractional score: %.2e\n"%(init_score, fish, score/fish))
+            fish = w_opt@deriv_matrix[inds][:,inds]@w_opt
+            print("Ideal Fisher: %.4e (initial), %.4e (optimized). Fractional score: %.2e\n"%(init_score, fish*init_score, score/fish))
 
             # Store selected points and weights
             selection[template] = alive[inds], w_opt*point_weights[alive[inds]]
