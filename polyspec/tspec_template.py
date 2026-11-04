@@ -40,13 +40,12 @@ class TSpecTemplate():
 
     Dissipative (open EFT) noise templates are specified as 'gNL-pia4:<gamma>', 'gNL-dotpia4:<gamma>', 'gNL-delpia2pia2:<gamma>' or 'gNL-delpia4:<gamma>', where gamma is the dissipation rate in units of H.
     """
-    # Dissipative legs L(x = -k tau), nu = 3/2 + gamma/2H, their large-x power a (L ~ x^a cos x) and leg structure (s: scalar, v: gradient)
-    open_shapes = {'gNL-pia4': (lambda nu, x: jv(nu, x), -0.5, 'ssss'),
-                   'gNL-dotpia4': (lambda nu, x: x*jv(nu-1., x)+(3.-2.*nu)*jv(nu, x), 0.5, 'ssss'),
-                   'gNL-delpia2pia2': (lambda nu, x: jv(nu, x), -0.5, 'ssvv'),
-                   'gNL-delpia4': (lambda nu, x: jv(nu, x), -0.5, 'vvvv')}
+    # Dissipative legs L(x = -k tau), nu = 3/2 + gamma/2H, and their large-x power a (L ~ x^a cos x)
+    open_legs = {'J': (lambda nu, x: jv(nu, x), -0.5),
+                 'dotJ': (lambda nu, x: x*jv(nu-1., x)+(3.-2.*nu)*jv(nu, x), 0.5)}
 
-    # Regular-tetrahedron value of the gradient contractions for each leg structure
+    # Dissipative shapes: leg and leg structure (s: scalar, v: gradient), with the regular-tetrahedron value of the gradient contractions
+    open_shapes = {'gNL-pia4': ('J', 'ssss'), 'gNL-dotpia4': ('dotJ', 'ssss'), 'gNL-delpia2pia2': ('J', 'ssvv'), 'gNL-delpia4': ('J', 'vvvv')}
     open_structures = {'ssss': 1., 'ssvv': 2., 'vvvv': 1./3.}
 
     def __init__(self, base, mask, applySinv, templates, lmin, lmax, k_arr=[], Tl_arr=[],
@@ -384,7 +383,8 @@ class TSpecTemplate():
             if t.split(':')[0] in self.open_shapes.keys():
                 # Store the dissipation rate gamma/H
                 shape, gamma = t.split(':')[0], float(t.split(':')[1])
-                gamma_min = 1.5+2.*self.open_shapes[shape][1]+self.open_shapes[shape][2].count('v')//2
+                leg, structure = self.open_shapes[shape]
+                gamma_min = 1.5+2.*self.open_legs[leg][1]+structure.count('v')//2
                 assert gamma>gamma_min, "%s requires gamma/H > %.1f for a convergent trispectrum"%(shape, gamma_min)
                 self.open_gamma[t] = gamma
                 self.all_templates_2d.append(t)
@@ -586,11 +586,16 @@ class TSpecTemplate():
             return wrap_func 
         return _timer_func_int
        
+    def _open_template(self, t):
+        """Return the leg key (name, gamma) and leg structure of a dissipative template."""
+        leg, structure = self.open_shapes[t.split(':')[0]]
+        return (leg, self.open_gamma[t]), structure
+
     def _open_normalization(self, shape, nu, xmax=1e4, dx=5e-3):
         """Equilateral normalization Int dx x^(8-4nu+2n) L(x)^4 of a dissipative leg with n gradient pairs (Simpson's rule to xmax plus the mean large-x tail), including the regular-tetrahedron gradient contractions."""
 
-        leg, a, structure = self.open_shapes[shape]
-        n = structure.count('v')//2
+        leg, a = self.open_legs[self.open_shapes[shape][0]]
+        n = self.open_shapes[shape][1].count('v')//2
 
         # Integrate up to xmax with Simpson's rule
         x = np.linspace(0., xmax, 2*int(xmax/dx/2)+1)
@@ -603,7 +608,7 @@ class TSpecTemplate():
 
         # Add the non-oscillatory part of the tail
         integral += 3./8.*(2./np.pi)**2*xmax**(9.-4.*nu+4.*a+2.*n)/(4.*nu-9.-4.*a-2.*n)
-        return integral*self.open_structures[structure]
+        return integral*self.open_structures[self.open_shapes[shape][1]]
 
     @_timer_func('precomputation')
     def _prepare_templates(self, ints_1d=True, ints_2d=True, ints_coll=True):
@@ -688,7 +693,7 @@ class TSpecTemplate():
             jlkrtau = interpolate_jlkr(x_arr, self.k_arr, self.rtau_arr[:,0], jlxs, self.base.nthreads)
             
             # Compute j_l'(x)
-            if 'b' in self.to_compute or any('v' in self.open_shapes[t.split(':')[0]][2] for t in self.open_gamma.keys()):
+            if 'b' in self.to_compute or any('v' in self._open_template(t)[1] for t in self.open_gamma.keys()):
                 jlkrtau_prime = compute_jl_prime(lmin, lmax, self.lmin, self.lmax, jlkrtau, self.base.nthreads)
             
             # Trim excess values
@@ -699,34 +704,32 @@ class TSpecTemplate():
         Pzeta_arr = self.Pzeta(self.k_arr)
 
         if 'd' in self.to_compute and ints_2d:
-            # Compute d integrals in Cython for each dissipative template
+            # Compute d integrals in Cython for each dissipative leg, and the equilateral normalization of each template
             print("Computing d_l^X(r, tau) integrals")
             self.dlXs = {}
+            self.open_norm = {}
             for t in self.open_gamma.keys():
+                key, structure = self._open_template(t)
+                nu = 1.5+key[1]/2.
+                self.open_norm[t] = self._open_normalization(t.split(':')[0], nu)
+                legs = self.dlXs.setdefault(key, {})
 
-                # Define the leg function on the k, tau grid, normalized to the equilateral configuration
-                nu = 1.5+self.open_gamma[t]/2.
-                leg, a, structure = self.open_shapes[t.split(':')[0]]
-                Ieq = self._open_normalization(t.split(':')[0], nu)
-                leg_arr = self.k_arr[None,:]**(1.-nu)*(-self.rtau_arr[:,1,None])**(2.-nu)*leg(nu,-self.k_arr[None,:]*self.rtau_arr[:,1,None])/Ieq**0.25
-                self.dlXs[t] = {}
+                # Define the leg function on the k, tau grid
+                leg_arr = self.k_arr[None,:]**(1.-nu)*(-self.rtau_arr[:,1,None])**(2.-nu)*self.open_legs[key[0]][0](nu,-self.k_arr[None,:]*self.rtau_arr[:,1,None])
 
-                # Compute scalar-leg d integrals in Cython (with the dotdel kernels supplying a factor of tau for each scalar leg)
-                if structure=='ssss':
-                    self.dlXs[t]['s'] = np.zeros((self.lmax+1,1+2*self.pol,self.N_rtau),dtype=np.float64,order='C')
-                    d_integral(self.k_arr, np.ascontiguousarray(leg_arr), Pzeta_arr, self.Tl_arr, jlkrtau, self.lmin, self.lmax, self.base.nthreads, self.dlXs[t]['s'])
-                if structure=='ssvv':
-                    self.dlXs[t]['s'] = np.zeros((self.lmax+1,1+2*self.pol,self.N_rtau),dtype=np.float64,order='C')
-                    d_integral(self.k_arr, np.ascontiguousarray(leg_arr/self.rtau_arr[:,1,None]), Pzeta_arr, self.Tl_arr, jlkrtau, self.lmin, self.lmax, self.base.nthreads, self.dlXs[t]['s'])
+                # Compute scalar-leg d integrals in Cython
+                if 's' in structure and 's' not in legs.keys():
+                    legs['s'] = np.zeros((self.lmax+1,1+2*self.pol,self.N_rtau),dtype=np.float64,order='C')
+                    d_integral(self.k_arr, np.ascontiguousarray(leg_arr), Pzeta_arr, self.Tl_arr, jlkrtau, self.lmin, self.lmax, self.base.nthreads, legs['s'])
 
                 # Compute radial and angular gradient-leg d integrals in Cython
-                if 'v' in structure:
+                if 'v' in structure and 'b' not in legs.keys():
                     grad_arr = -self.rtau_arr[:,1,None]*leg_arr
-                    self.dlXs[t]['b'] = np.zeros((self.lmax+1,1+2*self.pol,self.N_rtau),dtype=np.float64,order='C')
-                    d_integral(self.k_arr, np.ascontiguousarray(self.k_arr[None,:]*grad_arr), Pzeta_arr, self.Tl_arr, jlkrtau_prime, self.lmin, self.lmax, self.base.nthreads, self.dlXs[t]['b'])
-                    self.dlXs[t]['c'] = np.zeros((self.lmax+1,1+2*self.pol,self.N_rtau),dtype=np.float64,order='C')
-                    d_integral(self.k_arr, np.ascontiguousarray(grad_arr/self.rtau_arr[:,0,None]), Pzeta_arr, self.Tl_arr, jlkrtau, self.lmin, self.lmax, self.base.nthreads, self.dlXs[t]['c'])
-                    self.dlXs[t]['c'] *= np.sqrt(np.arange(self.lmax+1)*np.arange(1,self.lmax+2))[:,None,None]
+                    legs['b'] = np.zeros((self.lmax+1,1+2*self.pol,self.N_rtau),dtype=np.float64,order='C')
+                    d_integral(self.k_arr, np.ascontiguousarray(self.k_arr[None,:]*grad_arr), Pzeta_arr, self.Tl_arr, jlkrtau_prime, self.lmin, self.lmax, self.base.nthreads, legs['b'])
+                    legs['c'] = np.zeros((self.lmax+1,1+2*self.pol,self.N_rtau),dtype=np.float64,order='C')
+                    d_integral(self.k_arr, np.ascontiguousarray(grad_arr/self.rtau_arr[:,0,None]), Pzeta_arr, self.Tl_arr, jlkrtau, self.lmin, self.lmax, self.base.nthreads, legs['c'])
+                    legs['c'] *= np.sqrt(np.arange(self.lmax+1)*np.arange(1,self.lmax+2))[:,None,None]
 
         if 'a' in self.to_compute and ints_2d:
             # Compute a integrals in Cython
@@ -1214,7 +1217,7 @@ class TSpecTemplate():
             return np.asarray([self._compute_weighted_maps(imap, self.rlXs) for imap in input_maps], order='C')
 
         elif filtering=='D':
-            return {t: {c: np.asarray([self._compute_weighted_maps(imap, self.dlXs[t][c], spin=(c=='c')) for imap in input_maps], order='C') for c in self.dlXs[t].keys()} for t in self.open_gamma.keys()}
+            return {key: {c: np.asarray([self._compute_weighted_maps(imap, legs[c], spin=(c=='c')) for imap in input_maps], order='C') for c in legs.keys()} for key, legs in self.dlXs.items()}
               
         elif filtering=='U':
             return np.asarray([self._compute_lensing_U_map(imap) for imap in input_maps], order='C')        
@@ -1287,7 +1290,7 @@ class TSpecTemplate():
             output['r'] = self._compute_weighted_maps(input_map, self.rlXs)
 
         if 'd' in self.to_compute:
-            output['d'] = {t: {c: self._compute_weighted_maps(input_map, self.dlXs[t][c], spin=(c=='c')) for c in self.dlXs[t].keys()} for t in self.open_gamma.keys()}
+            output['d'] = {key: {c: self._compute_weighted_maps(input_map, legs[c], spin=(c=='c')) for c in legs.keys()} for key, legs in self.dlXs.items()}
 
         # Compute lensing maps
         if 'u' in self.to_compute:
@@ -2241,15 +2244,16 @@ class TSpecTemplate():
                 elif template in self.open_gamma.keys():
 
                     if verb: print("\tComputing %s Fisher matrix derivative exactly"%template)
-                    structure = self.open_shapes[template.split(':')[0]][2]
+                    key, structure = self._open_template(template)
+                    dlX = self.dlXs[key]
                     if structure=='ssss':
-                        deriv_matrix = np.asarray(fisher_deriv_gNL_con(self.dlXs[template]['s'], w, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
-                                            legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+                        deriv_matrix = np.asarray(fisher_deriv_gNL_con(dlX['s'], w, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
+                                            legs, w_mus, self.lmin, self.lmax, self.base.nthreads))/self.open_norm[template]**2
                     elif structure=='ssvv':
-                        deriv_matrix = (13./64.)**2*np.asarray(fisher_deriv_gNL_dotdel(self.dlXs[template]['s'], self.dlXs[template]['b'], self.dlXs[template]['c'], self.rtau_arr[:,1], w, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
+                        deriv_matrix = (13./64./self.open_norm[template])**2*np.asarray(fisher_deriv_gNL_dotdel(dlX['s']/self.rtau_arr[:,1], dlX['b'], dlX['c'], self.rtau_arr[:,1], w, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                             legs, mus, w_mus, self.lmin, self.lmax, self.base.nthreads))
                     elif structure=='vvvv':
-                        deriv_matrix = (103./384.)**2*np.asarray(fisher_deriv_gNL_deldel(self.dlXs[template]['b'], self.dlXs[template]['c'], w, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
+                        deriv_matrix = (103./384./self.open_norm[template])**2*np.asarray(fisher_deriv_gNL_deldel(dlX['b'], dlX['c'], w, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
                                             legs, mus, w_mus, self.lmin, self.lmax, self.base.nthreads))
 
                 elif template=='gNL-dotdot':
@@ -2548,13 +2552,14 @@ class TSpecTemplate():
                 if verb: print("Computing %s template"%t)
 
                 t_init = time.time()
-                structure = self.open_shapes[t.split(':')[0]][2]
+                key, structure = self._open_template(t)
+                D = proc_maps['d'][key]
                 if structure=='ssss':
-                    t4_num[ii] = 9./25.*self.utils.gnl_con_sum(self.rtau_weights[t], proc_maps['d'][t]['s'])*self.base.A_pix
+                    t4_num[ii] = 9./25.*self.utils.gnl_con_sum(self.rtau_weights[t], D['s'])*self.base.A_pix/self.open_norm[t]
                 elif structure=='ssvv':
-                    t4_num[ii] = 9./50.*self.utils.gnl_dotdel_sum(self.rtau_weights[t], self.rtau_arr[:,1], proc_maps['d'][t]['s'], proc_maps['d'][t]['b'], proc_maps['d'][t]['c'])*12*self.base.A_pix
+                    t4_num[ii] = 9./50.*self.utils.gnl_dotdel_sum(self.rtau_weights[t], self.rtau_arr[:,1], D['s']/self.rtau_arr[:,1][:,None], D['b'], D['c'])*12*self.base.A_pix/self.open_norm[t]
                 elif structure=='vvvv':
-                    t4_num[ii] = 9./50.*self.utils.gnl_deldel_sum(self.rtau_weights[t], proc_maps['d'][t]['b'], proc_maps['d'][t]['c'])*6*self.base.A_pix
+                    t4_num[ii] = 9./50.*self.utils.gnl_deldel_sum(self.rtau_weights[t], D['b'], D['c'])*6*self.base.A_pix/self.open_norm[t]
                 self.timers['gNL_summation'] += time.time()-t_init
 
             elif t=='gNL-dotdot':
@@ -2787,27 +2792,32 @@ class TSpecTemplate():
 
                     elif t in self.open_gamma.keys():
                         t_init = time.time()
-                        structure = self.open_shapes[t.split(':')[0]][2]
+                        key, structure = self._open_template(t)
+                        norm = self.open_norm[t]
+
+                        def _S(maps):
+                            """Scalar-leg map, stripped of the tau factor supplied by the dotdel kernels."""
+                            return maps['d'][key]['s']/self.rtau_arr[:,1][:,None]
 
                         if structure=='ssss':
 
                             def _return_perm(map12, map34):
-                                return self.utils.gnl_con_disc_sum(self.rtau_weights[t], map12['d'][t]['s'], map34['d'][t]['s'])
+                                return self.utils.gnl_con_disc_sum(self.rtau_weights[t], map12['d'][key]['s'], map34['d'][key]['s'])
 
                             # First set of fields
                             summ = _return_perm(proc_maps, this_proc_a_maps)
                             # Second set of fields
                             summ += _return_perm(proc_maps, this_proc_b_maps)
-                            t2_num[ii] += -27./25.*summ/self.N_it*self.base.A_pix
+                            t2_num[ii] += -27./25.*summ/self.N_it*self.base.A_pix/norm
 
                             if compute_t0:
                                 summ = _return_perm(this_proc_a_maps, this_proc_b_maps)
-                                t0_num[ii] += 27./25.*summ/self.N_it*self.base.A_pix
+                                t0_num[ii] += 27./25.*summ/self.N_it*self.base.A_pix/norm
 
                         elif structure=='ssvv':
 
                             def _return_perm(map1,map2,map3,map4):
-                                return self.utils.gnl_dotdel_disc_sum(self.rtau_weights[t], self.rtau_arr[:,1], map1['d'][t]['s'],map2['d'][t]['s'],map3['d'][t]['b'],map4['d'][t]['b'],map3['d'][t]['c'],map4['d'][t]['c'])
+                                return self.utils.gnl_dotdel_disc_sum(self.rtau_weights[t], self.rtau_arr[:,1], _S(map1),_S(map2),map3['d'][key]['b'],map4['d'][key]['b'],map3['d'][key]['c'],map4['d'][key]['c'])
 
                             # First set of fields
                             summ  = 2*_return_perm(this_proc_a_maps,this_proc_a_maps,proc_maps,proc_maps)
@@ -2817,18 +2827,18 @@ class TSpecTemplate():
                             summ += 2*_return_perm(this_proc_b_maps,this_proc_b_maps,proc_maps,proc_maps)
                             summ += 8*_return_perm(this_proc_b_maps,proc_maps,this_proc_b_maps,proc_maps)
                             summ += 2*_return_perm(proc_maps,proc_maps,this_proc_b_maps,this_proc_b_maps)
-                            t2_num[ii] += -27./50.*summ/self.N_it*self.base.A_pix
+                            t2_num[ii] += -27./50.*summ/self.N_it*self.base.A_pix/norm
 
                             if compute_t0:
                                 summ  = 2*_return_perm(this_proc_a_maps,this_proc_a_maps,this_proc_b_maps,this_proc_b_maps)
                                 summ += 8*_return_perm(this_proc_a_maps,this_proc_b_maps,this_proc_a_maps,this_proc_b_maps)
                                 summ += 2*_return_perm(this_proc_b_maps,this_proc_b_maps,this_proc_a_maps,this_proc_a_maps)
-                                t0_num[ii] += 27./50.*summ/self.N_it*self.base.A_pix
+                                t0_num[ii] += 27./50.*summ/self.N_it*self.base.A_pix/norm
 
                         elif structure=='vvvv':
 
                             def _return_perm(map1,map2,map3,map4):
-                                return self.utils.gnl_deldel_disc_sum(self.rtau_weights[t], map1['d'][t]['b'], map2['d'][t]['b'], map3['d'][t]['b'], map4['d'][t]['b'], map1['d'][t]['c'], map2['d'][t]['c'], map3['d'][t]['c'], map4['d'][t]['c'])
+                                return self.utils.gnl_deldel_disc_sum(self.rtau_weights[t], map1['d'][key]['b'], map2['d'][key]['b'], map3['d'][key]['b'], map4['d'][key]['b'], map1['d'][key]['c'], map2['d'][key]['c'], map3['d'][key]['c'], map4['d'][key]['c'])
 
                             # First set of fields
                             summ =  2*_return_perm(this_proc_a_maps,this_proc_a_maps,proc_maps,proc_maps)
@@ -2836,12 +2846,12 @@ class TSpecTemplate():
                             # Second set of fields
                             summ += 2*_return_perm(this_proc_b_maps,this_proc_b_maps,proc_maps,proc_maps)
                             summ += 4*_return_perm(this_proc_b_maps,proc_maps,this_proc_b_maps,proc_maps)
-                            t2_num[ii] += -27./50.*summ/self.N_it*self.base.A_pix
+                            t2_num[ii] += -27./50.*summ/self.N_it*self.base.A_pix/norm
 
                             if compute_t0:
                                 summ =  2*_return_perm(this_proc_a_maps,this_proc_a_maps,this_proc_b_maps,this_proc_b_maps)
                                 summ += 4*_return_perm(this_proc_a_maps,this_proc_b_maps,this_proc_a_maps,this_proc_b_maps)
-                                t0_num[ii] += 27./50.*summ/self.N_it*self.base.A_pix
+                                t0_num[ii] += 27./50.*summ/self.N_it*self.base.A_pix/norm
                         self.timers['gNL_summation'] += time.time()-t_init
 
                     elif t=='gNL-dotdot':
@@ -4314,13 +4324,19 @@ class TSpecTemplate():
 
                 elif t in self.open_gamma.keys():
                     if verb: print("Computing Q-derivative for %s"%t)
-                    structure = self.open_shapes[t.split(':')[0]][2]
-                    Ds = D_maps[t]
-                    tau2 = self.rtau_arr[:,1][None,None,:]**2. if structure=='ssvv' else 1.
+                    key, structure = self._open_template(t)
+                    comps = ['s']*('s' in structure)+['b','c']*('v' in structure)
+                    Ds = {c: D_maps[key][c] for c in comps}
+                    ds = {c: self.dlXs[key][c] for c in comps}
+
+                    # Strip the tau factor supplied by the dotdel kernels from the scalar legs
+                    if structure=='ssvv':
+                        Ds['s'] = Ds['s']/self.rtau_arr[:,1][:,None]
+                        ds = {c: ds[c]*self.rtau_arr[:,1][None,None,:]**(1. if c=='s' else 2.) for c in comps}
 
                     # Compute all fields, summing over the open leg
                     for i, abc in enumerate([(0,0,0),(1,1,1),(0,0,1),(0,1,1)]):
-                        maps = {c: 0. for c in Ds.keys()}
+                        maps = {c: 0. for c in comps}
                         if structure=='ssss':
                             maps['s'] = self.utils.multiply(Ds['s'][abc[0]],Ds['s'][abc[1]],Ds['s'][abc[2]])
                         else:
@@ -4334,7 +4350,7 @@ class TSpecTemplate():
                                 else:
                                     maps['b'] += self.utils.multiply2R(Ds['b'][x],quad)
                                     maps['c'] += self.utils.multiply2C(Ds['c'][x],quad)
-                        Qs[i,ii] = 216./25.*sum([self._transform_maps(maps[c],self.dlXs[t][c]*tau2,self.rtau_weights[t],spin=(c=='c')) for c in Ds.keys()])
+                        Qs[i,ii] = 216./25.*sum([self._transform_maps(maps[c],ds[c],self.rtau_weights[t],spin=(c=='c')) for c in comps])/self.open_norm[t]
 
                 elif t=='gNL-dotdot':
                     if verb: print("Computing Q-derivative for gNL-dotdot")
