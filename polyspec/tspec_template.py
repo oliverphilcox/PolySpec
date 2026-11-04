@@ -583,11 +583,21 @@ class TSpecTemplate():
        
     def _open_normalization(self, shape, nu, xmax=1e4, dx=5e-3):
         """Equilateral normalization Int dx x^(8-4nu) L(x)^4 of a dissipative leg (Simpson's rule to xmax plus the mean large-x tail)."""
+
         leg, a = self.open_shapes[shape]
+
+        # Integrate up to xmax with Simpson's rule
         x = np.linspace(0., xmax, 2*int(xmax/dx/2)+1)
-        f = np.zeros(len(x)); f[1:] = x[1:]**(8.-4.*nu)*leg(nu, x[1:])**4.
-        wts = np.ones(len(x)); wts[1:-1:2] = 4.; wts[2:-1:2] = 2.
-        return (x[1]-x[0])/3.*np.sum(wts*f) + 3./8.*(2./np.pi)**2*xmax**(9.-4.*nu+4.*a)/(4.*nu-9.-4.*a)
+        integrand = np.zeros(len(x))
+        integrand[1:] = x[1:]**(8.-4.*nu)*leg(nu, x[1:])**4.
+        weights = np.ones(len(x))
+        weights[1:-1:2] = 4.
+        weights[2:-1:2] = 2.
+        integral = (x[1]-x[0])/3.*np.sum(weights*integrand)
+
+        # Add the non-oscillatory part of the tail
+        integral += 3./8.*(2./np.pi)**2*xmax**(9.-4.*nu+4.*a)/(4.*nu-9.-4.*a)
+        return integral
 
     @_timer_func('precomputation')
     def _prepare_templates(self, ints_1d=True, ints_2d=True, ints_coll=True):
@@ -709,10 +719,14 @@ class TSpecTemplate():
             print("Computing d_l^X(r, tau) integrals")
             self.dlXs = {}
             for t in self.open_gamma.keys():
+
+                # Define the leg function on the k, tau grid, normalized to the equilateral configuration
                 nu = 1.5+self.open_gamma[t]/2.
                 leg = self.open_shapes[t.split(':')[0]][0]
                 Ieq = self._open_normalization(t.split(':')[0], nu)
                 leg_arr = self.k_arr[None,:]**(1.-nu)*(-self.rtau_arr[:,1,None])**(2.-nu)*leg(nu,-self.k_arr[None,:]*self.rtau_arr[:,1,None])/Ieq**0.25
+
+                # Compute d integrals in Cython
                 self.dlXs[t] = np.zeros((self.lmax+1,1+2*self.pol,self.N_rtau),dtype=np.float64,order='C')
                 d_integral(self.k_arr, np.ascontiguousarray(leg_arr), Pzeta_arr, self.Tl_arr, jlkrtau, self.lmin, self.lmax, self.base.nthreads, self.dlXs[t])
 
